@@ -1,0 +1,56 @@
+<mujoco model="g1_table_box_scene">
+  <compiler angle="radian" 
+            meshdir="assets/" 
+            texturedir="assets/"/>
+  
+  <option timestep="0.002" integrator="RK4" gravity="0 0 -9.81"/>
+  
+  <include file="g1.xml"/>
+  
+  <asset>
+    <material name="table_wood" rgba="0.8 0.6 0.4 1" shininess="0.5"/>
+    <material name="box_red" rgba="0.9 0.1 0.1 1" shininess="0.3"/>
+    <material name="cylinder_blue" rgba="0.1 0.1 0.9 1" shininess="0.3"/>
+    <material name="cone_green" rgba="0.1 0.8 0.2 1" shininess="0.3"/>
+    
+    <texture name="floor_tex" type="2d" builtin="checker" width="300" height="300" 
+             rgb1="0.3 0.3 0.3" rgb2="0.4 0.4 0.4"/>
+    <material name="floor_mat" texture="floor_tex" texrepeat="12 12" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" pos="0 0 0" size="5 5 0.1" type="plane" material="floor_mat"/>
+    <light name="main_light" directional="true" ambient="0.3 0.3 0.3" diffuse="0.8 0.8 0.8" 
+           specular="0.3 0.3 0.3" castshadow="true" pos="1 1 4" dir="-0.3 -0.3 -1"/>
+    
+    <body name="table" pos="0.6 0 0">
+      <geom name="table_top" type="box" size="0.8 0.6 0.04" pos="0.3 0 0.66" material="table_wood"/>
+      <geom name="table_leg1" type="cylinder" size="0.04 0.38" pos="1 0.5 0.28" material="table_wood"/>
+      <geom name="table_leg2" type="cylinder" size="0.04 0.38" pos="1 -0.5 0.28" material="table_wood"/>
+      <geom name="table_leg3" type="cylinder" size="0.04 0.38" pos="-0.4 0.5 0.28" material="table_wood"/>
+      <geom name="table_leg4" type="cylinder" size="0.04 0.38" pos="-0.4 -0.5 0.28" material="table_wood"/>
+    </body>
+    
+    <body name="red_box" >
+      <joint name="red_box_joint" type="free"/>
+      <geom name="red_box_geom" type="box" size="0.04 0.04 0.04" pos="0.7 0 0.6" material="box_red" mass="0.2"/>
+    </body>
+
+    <body name="blue_cylinder">
+     <joint name="blue_cylinder_joint" type="free"/>
+     <geom name="blue_cylinder_geom" type="cylinder" size="0.05 0.1" pos="0.4 0 0.6" material="cylinder_blue" mass="0.2"/>
+    </body>
+
+    <body name="blue_cylinder2">
+     <joint name="blue_cylinder2_joint" type="free"/>
+     <geom name="blue_cylinder2_geom" type="cylinder" size="0.02 0.1" pos="0.4 -0.2 0.6" material="cylinder_blue" mass="0.3"/>
+    </body>
+   
+    <body name="green_cone" >
+      <joint name="green_cone_joint" type="free"/>
+      <geom name="green_cone_geom" type="ellipsoid" size="0.04 0.1 0.04" pos="0.35 0.25 0.6" material="cone_green" mass="0.2"/>
+    </body>
+    
+    
+  </worldbody>
+</mujoco>
