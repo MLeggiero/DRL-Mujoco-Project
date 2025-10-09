@@ -10,7 +10,6 @@
   <asset>
     <material name="table_wood" rgba="0.8 0.6 0.4 1" shininess="0.5"/>
     <material name="box_red" rgba="0.9 0.1 0.1 1" shininess="0.3"/>
-    <material name="cylinder_blue" rgba="0.1 0.1 0.9 1" shininess="0.3"/>
     <material name="cone_green" rgba="0.1 0.8 0.2 1" shininess="0.3"/>
     
     <texture name="floor_tex" type="2d" builtin="checker" width="300" height="300" 
@@ -34,16 +33,6 @@
     <body name="red_box" >
       <joint name="red_box_joint" type="free"/>
       <geom name="red_box_geom" type="box" size="0.04 0.04 0.04" pos="0.7 0 0.6" material="box_red" mass="0.2"/>
-    </body>
-
-    <body name="blue_cylinder">
-     <joint name="blue_cylinder_joint" type="free"/>
-     <geom name="blue_cylinder_geom" type="cylinder" size="0.05 0.1" pos="0.4 0 0.6" material="cylinder_blue" mass="0.2"/>
-    </body>
-
-    <body name="blue_cylinder2">
-     <joint name="blue_cylinder2_joint" type="free"/>
-     <geom name="blue_cylinder2_geom" type="cylinder" size="0.02 0.1" pos="0.4 -0.2 0.6" material="cylinder_blue" mass="0.3"/>
     </body>
    
     <body name="green_cone" >
