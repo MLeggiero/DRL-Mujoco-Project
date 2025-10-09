@@ -1,0 +1,204 @@
+<mujoco model="g1_table_box_scene_mjx">
+  <compiler angle="radian" 
+            meshdir="assets/" 
+            texturedir="assets/"/>
+  
+  <option timestep="0.002" integrator="RK4" gravity="0 0 -9.81"/>
+  
+  <!-- Simplified G1 model for MJX compatibility -->
+  <!-- Uses boxes instead of meshes for collision -->
+  
+  <asset>
+    <material name="table_wood" rgba="0.8 0.6 0.4 1" shininess="0.5"/>
+    <material name="box_red" rgba="0.9 0.1 0.1 1" shininess="0.3"/>
+    <material name="cylinder_blue" rgba="0.1 0.1 0.9 1" shininess="0.3"/>
+    <material name="cone_green" rgba="0.1 0.8 0.2 1" shininess="0.3"/>
+    <material name="robot_grey" rgba="0.7 0.7 0.7 1" shininess="0.3"/>
+    
+    <texture name="floor_tex" type="2d" builtin="checker" width="300" height="300" 
+             rgb1="0.3 0.3 0.3" rgb2="0.4 0.4 0.4"/>
+    <material name="floor_mat" texture="floor_tex" texrepeat="12 12" reflectance="0.1"/>
+    
+    <!-- Load only visual meshes (no collision) -->
+    <mesh file="pelvis.STL"/>
+    <mesh file="torso_link_rev_1_0.STL"/>
+    <mesh file="right_shoulder_pitch_link.STL"/>
+    <mesh file="right_shoulder_roll_link.STL"/>
+    <mesh file="right_shoulder_yaw_link.STL"/>
+    <mesh file="right_elbow_link.STL"/>
+    <mesh file="right_wrist_roll_link.STL"/>
+    <mesh file="right_wrist_pitch_link.STL"/>
+    <mesh file="right_wrist_yaw_link.STL"/>
+  </asset>
+
+  <default>
+    <default class="g1">
+      <joint armature="0.01" frictionloss="0.3"/>
+      <geom condim="3" friction="0.9 0.005 0.0001"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <geom name="floor" pos="0 0 0" size="5 5 0.1" type="plane" material="floor_mat"/>
+    <light name="main_light" directional="true" ambient="0.3 0.3 0.3" diffuse="0.8 0.8 0.8" 
+           specular="0.3 0.3 0.3" castshadow="true" pos="1 1 4" dir="-0.3 -0.3 -1"/>
+    
+    <!-- Simplified table using only boxes (MJX compatible) -->
+    <body name="table" pos="0.6 0 0">
+      <geom name="table_top" type="box" size="0.8 0.6 0.04" pos="0.3 0 0.66" material="table_wood"/>
+      <geom name="table_leg1" type="box" size="0.04 0.04 0.38" pos="1 0.5 0.28" material="table_wood"/>
+      <geom name="table_leg2" type="box" size="0.04 0.04 0.38" pos="1 -0.5 0.28" material="table_wood"/>
+      <geom name="table_leg3" type="box" size="0.04 0.04 0.38" pos="-0.4 0.5 0.28" material="table_wood"/>
+      <geom name="table_leg4" type="box" size="0.04 0.04 0.38" pos="-0.4 -0.5 0.28" material="table_wood"/>
+    </body>
+    
+    <!-- Target: Red box -->
+    <body name="red_box" pos="0.7 0 0.74">
+      <joint name="red_box_joint" type="free"/>
+      <geom name="red_box_geom" type="box" size="0.04 0.04 0.04" material="box_red" mass="0.2"/>
+      <site name="red_box_site" pos="0 0 0" size="0.02"/>
+    </body>
+
+    <!-- Other objects (optional, for visual interest) -->
+    <body name="blue_box" pos="0.4 0 0.75">
+      <joint name="blue_box_joint" type="free"/>
+      <geom name="blue_box_geom" type="box" size="0.05 0.03 0.1" material="cylinder_blue" mass="0.2"/>
+    </body>
+   
+    <body name="green_box" pos="0.35 0.25 0.74">
+      <joint name="green_box_joint" type="free"/>
+      <geom name="green_box_geom" type="box" size="0.04 0.04 0.04" material="cone_green" mass="0.2"/>
+    </body>
+    
+    <!-- Simplified G1 Robot (box-based collision for MJX compatibility) -->
+    <body name="pelvis" pos="0 0 0.793" childclass="g1">
+      <freejoint name="floating_base_joint"/>
+      
+      <!-- Visual mesh -->
+      <geom type="mesh" mesh="pelvis" contype="0" conaffinity="0" group="2" material="robot_grey"/>
+      <!-- Collision box -->
+      <geom name="pelvis_collision" type="box" size="0.15 0.12 0.08" pos="0 0 -0.08" rgba="0.7 0.7 0.7 0.3"/>
+      
+      <body name="torso_link" pos="0 0 0.05">
+        <!-- Visual mesh -->
+        <geom type="mesh" mesh="torso_link_rev_1_0" contype="0" conaffinity="0" group="2" material="robot_grey"/>
+        <!-- Collision box -->
+        <geom name="torso_collision" type="box" size="0.12 0.15 0.25" pos="0 0 0.15" rgba="0.7 0.7 0.7 0.3"/>
+        
+        <!-- Simplified right arm -->
+        <body name="right_shoulder_pitch_link" pos="0 -0.1 0.25">
+          <joint name="right_shoulder_pitch_joint" axis="0 1 0" range="-3.0892 2.6704" class="g1"/>
+          <geom type="box" size="0.04 0.04 0.03" rgba="0.7 0.7 0.7 1"/>
+          
+          <body name="right_shoulder_roll_link" pos="0 -0.04 0">
+            <joint name="right_shoulder_roll_joint" axis="1 0 0" range="-2.2515 1.5882" class="g1"/>
+            <geom type="box" size="0.03 0.03 0.06" pos="0 0 -0.05" rgba="0.7 0.7 0.7 1"/>
+            
+            <body name="right_shoulder_yaw_link" pos="0 0 -0.1">
+              <joint name="right_shoulder_yaw_joint" axis="0 0 1" range="-2.618 2.618" class="g1"/>
+              <geom type="box" size="0.03 0.03 0.04" rgba="0.7 0.7 0.7 1"/>
+              
+              <body name="right_elbow_link" pos="0 0 -0.08">
+                <joint name="right_elbow_joint" axis="0 1 0" range="-1.0472 2.0944" class="g1"/>
+                <geom type="box" size="0.03 0.03 0.12" pos="0.05 0 -0.01" quat="0.966 0 0.259 0" rgba="0.7 0.7 0.7 1"/>
+                
+                <body name="right_wrist_roll_link" pos="0.1 0 -0.01">
+                  <joint name="right_wrist_roll_joint" axis="1 0 0" range="-1.97222 1.97222" class="g1"/>
+                  <geom type="box" size="0.02 0.02 0.02" rgba="0.7 0.7 0.7 1"/>
+                  
+                  <body name="right_wrist_pitch_link" pos="0.038 0 0">
+                    <joint name="right_wrist_pitch_joint" axis="0 1 0" range="-1.61443 1.61443" class="g1"/>
+                    <geom type="box" size="0.02 0.02 0.02" rgba="0.7 0.7 0.7 1"/>
+                    
+                    <body name="right_wrist_yaw_link" pos="0.046 0 0">
+                      <joint name="right_wrist_yaw_joint" axis="0 0 1" range="-1.61443 1.61443" class="g1"/>
+                      <geom type="box" size="0.04 0.03 0.02" pos="0.04 0 0" rgba="0.7 0.7 0.7 1"/>
+                      
+                      <!-- Hand tracking site -->
+                      <site name="right_hand_site" pos="0.08 0 0" size="0.02" rgba="0 1 0 0.5"/>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+        
+        <!-- Simplified left arm (for balance) -->
+        <body name="left_shoulder_pitch_link" pos="0 0.1 0.25">
+          <joint name="left_shoulder_pitch_joint" axis="0 1 0" range="-3.0892 2.6704" class="g1"/>
+          <geom type="box" size="0.04 0.04 0.03" rgba="0.7 0.7 0.7 1"/>
+          
+          <body name="left_shoulder_roll_link" pos="0 0.04 0">
+            <joint name="left_shoulder_roll_joint" axis="1 0 0" range="-0.5236 2.9671" class="g1"/>
+            <geom type="box" size="0.03 0.03 0.06" pos="0 0 -0.05" rgba="0.7 0.7 0.7 1"/>
+            
+            <body name="left_elbow_link" pos="0 0 -0.1">
+              <joint name="left_elbow_joint" axis="0 1 0" range="-1.0472 2.0944" class="g1"/>
+              <geom type="box" size="0.03 0.03 0.12" pos="0.05 0 0" quat="0.966 0 -0.259 0" rgba="0.7 0.7 0.7 1"/>
+            </body>
+          </body>
+        </body>
+      </body>
+      
+      <!-- Simplified right leg -->
+      <body name="right_hip_pitch_link" pos="0 -0.065 -0.1">
+        <joint name="right_hip_pitch_joint" axis="0 1 0" range="-2.5307 2.8798" class="g1"/>
+        <geom type="box" size="0.04 0.04 0.03" rgba="0.7 0.7 0.7 1"/>
+        
+        <body name="right_knee_link" pos="0 0 -0.2">
+          <joint name="right_knee_joint" axis="0 1 0" range="-0.087267 2.8798" class="g1"/>
+          <geom type="box" size="0.04 0.04 0.15" pos="0 0 -0.15" rgba="0.7 0.7 0.7 1"/>
+          
+          <body name="right_ankle_link" pos="0 0 -0.3">
+            <joint name="right_ankle_pitch_joint" axis="0 1 0" range="-0.87267 0.5236" class="g1"/>
+            <geom type="box" size="0.08 0.05 0.02" pos="0.03 0 -0.03" rgba="0.7 0.7 0.7 1"/>
+            <site name="right_foot" pos="0.03 0 -0.04"/>
+          </body>
+        </body>
+      </body>
+      
+      <!-- Simplified left leg -->
+      <body name="left_hip_pitch_link" pos="0 0.065 -0.1">
+        <joint name="left_hip_pitch_joint" axis="0 1 0" range="-2.5307 2.8798" class="g1"/>
+        <geom type="box" size="0.04 0.04 0.03" rgba="0.7 0.7 0.7 1"/>
+        
+        <body name="left_knee_link" pos="0 0 -0.2">
+          <joint name="left_knee_joint" axis="0 1 0" range="-0.087267 2.8798" class="g1"/>
+          <geom type="box" size="0.04 0.04 0.15" pos="0 0 -0.15" rgba="0.7 0.7 0.7 1"/>
+          
+          <body name="left_ankle_link" pos="0 0 -0.3">
+            <joint name="left_ankle_pitch_joint" axis="0 1 0" range="-0.87267 0.5236" class="g1"/>
+            <geom type="box" size="0.08 0.05 0.02" pos="0.03 0 -0.03" rgba="0.7 0.7 0.7 1"/>
+            <site name="left_foot" pos="0.03 0 -0.04"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- Right arm actuators -->
+    <position name="right_shoulder_pitch" joint="right_shoulder_pitch_joint" kp="500" ctrlrange="-3.0892 2.6704"/>
+    <position name="right_shoulder_roll" joint="right_shoulder_roll_joint" kp="500" ctrlrange="-2.2515 1.5882"/>
+    <position name="right_shoulder_yaw" joint="right_shoulder_yaw_joint" kp="500" ctrlrange="-2.618 2.618"/>
+    <position name="right_elbow" joint="right_elbow_joint" kp="500" ctrlrange="-1.0472 2.0944"/>
+    <position name="right_wrist_roll" joint="right_wrist_roll_joint" kp="300" ctrlrange="-1.97222 1.97222"/>
+    <position name="right_wrist_pitch" joint="right_wrist_pitch_joint" kp="300" ctrlrange="-1.61443 1.61443"/>
+    <position name="right_wrist_yaw" joint="right_wrist_yaw_joint" kp="300" ctrlrange="-1.61443 1.61443"/>
+    
+    <!-- Left arm actuators (for balance) -->
+    <position name="left_shoulder_pitch" joint="left_shoulder_pitch_joint" kp="500" ctrlrange="-3.0892 2.6704"/>
+    <position name="left_shoulder_roll" joint="left_shoulder_roll_joint" kp="500" ctrlrange="-0.5236 2.9671"/>
+    <position name="left_elbow" joint="left_elbow_joint" kp="500" ctrlrange="-1.0472 2.0944"/>
+    
+    <!-- Leg actuators -->
+    <position name="right_hip_pitch" joint="right_hip_pitch_joint" kp="500" ctrlrange="-2.5307 2.8798"/>
+    <position name="right_knee" joint="right_knee_joint" kp="500" ctrlrange="-0.087267 2.8798"/>
+    <position name="right_ankle_pitch" joint="right_ankle_pitch_joint" kp="300" ctrlrange="-0.87267 0.5236"/>
+    
+    <position name="left_hip_pitch" joint="left_hip_pitch_joint" kp="500" ctrlrange="-2.5307 2.8798"/>
+    <position name="left_knee" joint="left_knee_joint" kp="500" ctrlrange="-0.087267 2.8798"/>
+    <position name="left_ankle_pitch" joint="left_ankle_pitch_joint" kp="300" ctrlrange="-0.87267 0.5236"/>
+  </actuator>
+</mujoco>

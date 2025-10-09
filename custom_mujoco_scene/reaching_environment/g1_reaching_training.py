@@ -1,669 +1,510 @@
 """
-Training script for G1 Reaching Environment
-Includes Random, Evolutionary Strategy, and PPO algorithms
+G1 Reaching Environment using MuJoCo Playground (MJX) with GPU Acceleration
+This version uses GPU-accelerated physics simulation and training
+
+Installation:
+  pip install playground
+  pip install --upgrade "jax[cuda12]"  # For NVIDIA CUDA 12
+  # OR
+  pip install --upgrade "jax[cuda11]"  # For NVIDIA CUDA 11
 """
+
+import jax
+import jax.numpy as jnp
+from jax import random, jit, vmap, grad
+from flax import linen as nn
+from flax.training import train_state
+import optax
 import numpy as np
+from typing import Dict, Tuple
 import pickle
-import argparse
-from collections import deque
-from g1_reaching_env import G1ReachingEnv
 
-# ============================================================================
-# Policy Classes
-# ============================================================================
+# MuJoCo Playground imports
+try:
+    from mujoco import mjx
+    import mujoco
+    print(f"✓ MJX available (GPU physics)")
+    print(f"✓ JAX backend: {jax.default_backend()}")
+    print(f"✓ JAX devices: {jax.devices()}")
+except ImportError as e:
+    print(f"✗ Error importing MJX: {e}")
+    print("Install with: pip install playground")
+    raise
 
-class RandomPolicy:
-    """Random policy for baseline testing"""
-    def __init__(self, action_dim):
-        self.action_dim = action_dim
-    
-    def __call__(self, observation):
-        return np.random.uniform(-1.0, 1.0, size=self.action_dim)
-    
-    def get_params(self):
-        return None
+# Check for GPU
+if jax.default_backend() != 'gpu':
+    print("⚠ WARNING: No GPU detected! Running on CPU.")
+    print("Install CUDA-enabled JAX: pip install --upgrade 'jax[cuda12]'")
 
 
-class SimpleNeuralPolicy:
-    """Simple feedforward neural network policy"""
-    def __init__(self, obs_dim, action_dim, hidden_dims=[256, 256]):
-        self.obs_dim = obs_dim
-        self.action_dim = action_dim
-        self.hidden_dims = hidden_dims
-        self.params = None
+class G1ReachingEnvMJX:
+    """GPU-accelerated G1 reaching environment using MJX"""
     
-    def init_params(self, seed=0):
-        """Initialize network parameters with Xavier initialization"""
-        np.random.seed(seed)
+    def __init__(self, xml_path='g1_table_box_scene.xml', 
+                 num_envs=128,  # Batch size for parallel simulation
+                 episode_length=500):
+        """
+        Args:
+            xml_path: Path to MuJoCo XML file
+            num_envs: Number of parallel environments (GPU batch size)
+            episode_length: Maximum steps per episode
+        """
+        self.xml_path = xml_path
+        self.num_envs = num_envs
+        self.episode_length = episode_length
         
-        self.params = {}
-        layer_sizes = [self.obs_dim] + self.hidden_dims + [self.action_dim]
+        # Load MuJoCo model
+        print(f"Loading model from {xml_path}...")
+        self.mj_model = mujoco.MjModel.from_xml_path(xml_path)
+        self.mj_data = mujoco.MjData(self.mj_model)
         
-        for i in range(len(layer_sizes) - 1):
-            # Xavier initialization
-            limit = np.sqrt(6.0 / (layer_sizes[i] + layer_sizes[i+1]))
-            self.params[f'w{i+1}'] = np.random.uniform(
-                -limit, limit, (layer_sizes[i], layer_sizes[i+1])
-            )
-            self.params[f'b{i+1}'] = np.zeros(layer_sizes[i+1])
+        # Create MJX model (GPU version)
+        print(f"Creating MJX model for {num_envs} parallel environments...")
+        self.model = mjx.put_model(self.mj_model)
         
-        return self.params
+        # Cache body IDs
+        self._setup_ids()
+        
+        # JIT compile step function
+        self.step_fn = jit(self._step_fn)
+        self.reset_fn = jit(self._reset_fn)
+        
+        print(f"✓ Environment ready with {num_envs} parallel envs on {jax.devices()[0]}")
     
-    def __call__(self, observation):
-        """Forward pass through network"""
-        if self.params is None:
-            raise ValueError("Policy parameters not initialized! Call init_params() first.")
+    def _setup_ids(self):
+        """Cache body/site IDs"""
+        try:
+            self.right_hand_id = self.mj_model.site('right_hand_site').id
+            self.use_site = True
+        except:
+            self.right_hand_id = self.mj_model.body('right_wrist_yaw_link').id
+            self.use_site = False
         
-        x = observation
-        num_layers = len([k for k in self.params.keys() if k.startswith('w')])
+        self.red_box_id = self.mj_model.body('red_box').id
+        self.pelvis_id = self.mj_model.body('pelvis').id
         
-        for i in range(1, num_layers):
-            x = np.dot(x, self.params[f'w{i}']) + self.params[f'b{i}']
-            x = np.tanh(x)
+        print(f"Using {'site' if self.use_site else 'body'} for hand tracking")
+    
+    def _reset_fn(self, rng):
+        """Reset environment (JIT compiled, runs on GPU)"""
+        # Create initial data state
+        data = mjx.make_data(self.model)
         
-        # Final layer without activation, then tanh to bound actions
-        x = np.dot(x, self.params[f'w{num_layers}']) + self.params[f'b{num_layers}']
-        x = np.tanh(x)
+        # Add small random noise to initial state
+        qpos_noise = random.uniform(rng, shape=(self.model.nq,), minval=-0.01, maxval=0.01)
+        qvel_noise = random.uniform(rng, shape=(self.model.nv,), minval=-0.01, maxval=0.01)
+        
+        data = data.replace(
+            qpos=data.qpos + qpos_noise,
+            qvel=data.qvel + qvel_noise
+        )
+        
+        # Forward kinematics
+        data = mjx.forward(self.model, data)
+        
+        return data
+    
+    def reset(self, rng):
+        """Reset all parallel environments"""
+        # Generate separate RNG keys for each environment
+        rngs = random.split(rng, self.num_envs)
+        
+        # Vectorized reset across all environments
+        data_batch = vmap(self.reset_fn)(rngs)
+        
+        return data_batch
+    
+    def _step_fn(self, data, action):
+        """Single step (JIT compiled, runs on GPU)"""
+        # Apply action
+        data = data.replace(ctrl=action)
+        
+        # Step physics (5 substeps for smooth simulation)
+        for _ in range(5):
+            data = mjx.step(self.model, data)
+        
+        return data
+    
+    def step(self, data_batch, actions):
+        """Step all parallel environments"""
+        # Vectorized step across all environments
+        data_batch = vmap(self.step_fn)(data_batch, actions)
+        
+        # Compute observations and rewards
+        obs_batch = self._get_obs(data_batch)
+        rewards = self._compute_rewards(data_batch)
+        dones = self._check_done(data_batch)
+        
+        return data_batch, obs_batch, rewards, dones
+    
+    def _get_obs(self, data_batch):
+        """Get observations for all environments (vectorized)"""
+        def single_obs(data):
+            if self.use_site:
+                hand_pos = data.site_xpos[self.right_hand_id]
+            else:
+                hand_pos = data.xpos[self.right_hand_id]
+            
+            target_pos = data.xpos[self.red_box_id]
+            
+            obs = jnp.concatenate([
+                data.qpos,
+                data.qvel,
+                hand_pos,
+                target_pos,
+                hand_pos - target_pos
+            ])
+            return obs
+        
+        return vmap(single_obs)(data_batch)
+    
+    def _compute_rewards(self, data_batch):
+        """Compute rewards for all environments (vectorized)"""
+        def single_reward(data):
+            if self.use_site:
+                hand_pos = data.site_xpos[self.right_hand_id]
+            else:
+                hand_pos = data.xpos[self.right_hand_id]
+            
+            target_pos = data.xpos[self.red_box_id]
+            distance = jnp.linalg.norm(hand_pos - target_pos)
+            
+            # Main reward: negative distance
+            reward = -distance
+            
+            # Bonus for getting very close
+            reward += jnp.where(distance < 0.05, 10.0, 0.0)
+            
+            # Small action penalty
+            reward -= 0.001 * jnp.sum(data.ctrl ** 2)
+            
+            return reward
+        
+        return vmap(single_reward)(data_batch)
+    
+    def _check_done(self, data_batch):
+        """Check if episodes are done (vectorized)"""
+        def single_done(data):
+            # Check if robot fell
+            pelvis_height = data.xpos[self.pelvis_id][2]
+            fallen = pelvis_height < 0.4
+            
+            # Check if reached target
+            if self.use_site:
+                hand_pos = data.site_xpos[self.right_hand_id]
+            else:
+                hand_pos = data.xpos[self.right_hand_id]
+            target_pos = data.xpos[self.red_box_id]
+            distance = jnp.linalg.norm(hand_pos - target_pos)
+            reached = distance < 0.03
+            
+            return jnp.logical_or(fallen, reached)
+        
+        return vmap(single_done)(data_batch)
+    
+    @property
+    def observation_dim(self):
+        """Get observation dimension"""
+        return self.mj_model.nq + self.mj_model.nv + 9  # qpos + qvel + hand + target + relative
+    
+    @property
+    def action_dim(self):
+        """Get action dimension"""
+        return self.mj_model.nu
+
+
+class PolicyNetwork(nn.Module):
+    """Policy network using Flax (JAX neural network library)"""
+    action_dim: int
+    hidden_dims: Tuple[int] = (256, 256)
+    
+    @nn.compact
+    def __call__(self, x):
+        for hidden_dim in self.hidden_dims:
+            x = nn.Dense(hidden_dim)(x)
+            x = nn.tanh(x)
+        
+        x = nn.Dense(self.action_dim)(x)
+        x = nn.tanh(x)  # Bound actions to [-1, 1]
         
         return x
-    
-    def get_params(self):
-        return self.params
-    
-    def set_params(self, params):
-        self.params = params
 
 
-class ValueNetwork:
-    """Value function approximator for PPO"""
-    def __init__(self, obs_dim, hidden_dims=[256, 256]):
-        self.obs_dim = obs_dim
-        self.hidden_dims = hidden_dims
-        self.params = None
+class ValueNetwork(nn.Module):
+    """Value network using Flax"""
+    hidden_dims: Tuple[int] = (256, 256)
     
-    def init_params(self, seed=0):
-        """Initialize network parameters"""
-        np.random.seed(seed + 1000)
+    @nn.compact
+    def __call__(self, x):
+        for hidden_dim in self.hidden_dims:
+            x = nn.Dense(hidden_dim)(x)
+            x = nn.tanh(x)
         
-        self.params = {}
-        layer_sizes = [self.obs_dim] + self.hidden_dims + [1]
+        x = nn.Dense(1)(x)
         
-        for i in range(len(layer_sizes) - 1):
-            limit = np.sqrt(6.0 / (layer_sizes[i] + layer_sizes[i+1]))
-            self.params[f'w{i+1}'] = np.random.uniform(
-                -limit, limit, (layer_sizes[i], layer_sizes[i+1])
-            )
-            self.params[f'b{i+1}'] = np.zeros(layer_sizes[i+1])
-        
-        return self.params
-    
-    def __call__(self, observation):
-        """Forward pass to get value estimate"""
-        if self.params is None:
-            raise ValueError("Value network not initialized!")
-        
-        x = observation
-        num_layers = len([k for k in self.params.keys() if k.startswith('w')])
-        
-        for i in range(1, num_layers):
-            x = np.dot(x, self.params[f'w{i}']) + self.params[f'b{i}']
-            x = np.tanh(x)
-        
-        # Final layer - single value output
-        x = np.dot(x, self.params[f'w{num_layers}']) + self.params[f'b{num_layers}']
-        
-        return x[0] if x.shape == (1,) else x
-    
-    def get_params(self):
-        return self.params
-    
-    def set_params(self, params):
-        self.params = params
-
-
-# ============================================================================
-# Training Functions
-# ============================================================================
-
-def run_episode(env, policy, max_steps=1000, seed=None):
-    """Run a single episode and collect data"""
-    obs = env.reset(seed=seed)
-    
-    observations = []
-    actions = []
-    rewards = []
-    infos = []
-    
-    for step in range(max_steps):
-        # Get action from policy
-        action = policy(obs)
-        
-        # Step environment
-        next_obs, reward, done, info = env.step(action)
-        
-        # Store data
-        observations.append(obs)
-        actions.append(action)
-        rewards.append(reward)
-        infos.append(info)
-        
-        obs = next_obs
-        
-        if done:
-            break
-    
-    return {
-        'observations': np.array(observations),
-        'actions': np.array(actions),
-        'rewards': np.array(rewards),
-        'infos': infos,
-        'total_reward': np.sum(rewards),
-        'episode_length': len(rewards)
-    }
-
-
-def compute_returns(rewards, gamma=0.99):
-    """Compute discounted returns"""
-    returns = np.zeros_like(rewards, dtype=np.float32)
-    running_return = 0
-    
-    for t in reversed(range(len(rewards))):
-        running_return = rewards[t] + gamma * running_return
-        returns[t] = running_return
-    
-    return returns
+        return x.squeeze()
 
 
 def compute_gae(rewards, values, gamma=0.99, lam=0.95):
-    """Compute Generalized Advantage Estimation"""
-    advantages = np.zeros_like(rewards, dtype=np.float32)
-    last_advantage = 0
-    
-    for t in reversed(range(len(rewards))):
-        if t == len(rewards) - 1:
-            next_value = 0
-        else:
-            next_value = values[t + 1]
+    """Compute Generalized Advantage Estimation (GPU accelerated)"""
+    def scan_fn(carry, transition):
+        next_value, last_advantage = carry
+        reward, value, done = transition
         
-        delta = rewards[t] + gamma * next_value - values[t]
-        advantages[t] = last_advantage = delta + gamma * lam * last_advantage
-    
-    return advantages
-
-
-def train_random_policy(num_episodes=10, max_steps=1000):
-    """Train/test with random policy (baseline)"""
-    print("Testing random policy...")
-    print("="*60)
-    
-    env = G1ReachingEnv(max_episode_steps=max_steps)
-    policy = RandomPolicy(env.action_space_dim)
-    
-    results = []
-    
-    for episode in range(num_episodes):
-        trajectory = run_episode(env, policy, max_steps=max_steps, seed=episode)
+        delta = reward + gamma * next_value * (1 - done) - value
+        advantage = delta + gamma * lam * (1 - done) * last_advantage
         
-        print(f"Episode {episode + 1}/{num_episodes}:")
-        print(f"  Total Reward: {trajectory['total_reward']:.2f}")
-        print(f"  Episode Length: {trajectory['episode_length']}")
-        print(f"  Final Distance: {trajectory['infos'][-1]['distance']:.4f}m")
-        
-        results.append(trajectory)
+        return (value, advantage), advantage
     
-    avg_reward = np.mean([r['total_reward'] for r in results])
-    print("="*60)
-    print(f"Average Reward: {avg_reward:.2f}")
+    # Reverse trajectories
+    rewards_reversed = jnp.flip(rewards, axis=0)
+    values_reversed = jnp.flip(values, axis=0)
+    dones = jnp.zeros_like(rewards)  # Simplified for now
     
-    return results, policy
-
-
-def train_evolutionary_strategy(num_episodes=100, max_steps=1000, 
-                                learning_rate=0.1, population_size=10):
-    """
-    Improved evolutionary strategy with better exploration
-    """
-    print("Training with Evolutionary Strategy (Improved)...")
-    print("="*60)
-    
-    env = G1ReachingEnv(max_episode_steps=max_steps)
-    
-    # Initialize policy with larger network
-    policy = SimpleNeuralPolicy(
-        obs_dim=env.observation_space_dim,
-        action_dim=env.action_space_dim,
-        hidden_dims=[256, 256]
+    _, advantages = jax.lax.scan(
+        scan_fn,
+        (0.0, 0.0),
+        (rewards_reversed, values_reversed, dones)
     )
-    policy.init_params(seed=42)
     
-    best_params = policy.get_params()
-    best_reward = -float('inf')
-    recent_rewards = deque(maxlen=10)
+    advantages = jnp.flip(advantages, axis=0)
+    returns = advantages + values
     
-    # Adaptive learning rate
-    current_lr = learning_rate
-    
-    for episode in range(num_episodes):
-        # Generate population of policies
-        candidates = []
-        for i in range(population_size):
-            # Add Gaussian noise to best parameters
-            noisy_params = {}
-            for key in best_params:
-                noise = np.random.randn(*best_params[key].shape) * current_lr
-                noisy_params[key] = best_params[key] + noise
-            
-            # Evaluate candidate
-            policy.set_params(noisy_params)
-            trajectory = run_episode(env, policy, max_steps=max_steps, seed=episode*100+i)
-            
-            candidates.append({
-                'params': noisy_params,
-                'reward': trajectory['total_reward']
-            })
-        
-        # Select top performers
-        candidates.sort(key=lambda x: x['reward'], reverse=True)
-        top_k = max(1, population_size // 3)
-        
-        # Average top performers (simple crossover)
-        avg_params = {}
-        for key in best_params:
-            avg_params[key] = np.mean([c['params'][key] for c in candidates[:top_k]], axis=0)
-        
-        # Update if better
-        best_candidate = candidates[0]
-        if best_candidate['reward'] > best_reward:
-            best_reward = best_candidate['reward']
-            best_params = avg_params  # Use average of top performers
-            print(f"Episode {episode + 1}: NEW BEST Reward = {best_reward:.2f}")
-        else:
-            print(f"Episode {episode + 1}: Best = {best_reward:.2f}, Current = {best_candidate['reward']:.2f}")
-        
-        recent_rewards.append(best_candidate['reward'])
-        
-        # Adaptive learning rate
-        if len(recent_rewards) >= 10:
-            if np.std(recent_rewards) < 5.0:  # Converged, explore more
-                current_lr = min(current_lr * 1.1, learning_rate * 2)
-            else:
-                current_lr = max(current_lr * 0.95, learning_rate * 0.1)
-    
-    policy.set_params(best_params)
-    return policy
+    return advantages, returns
 
 
-def train_ppo(num_epochs=100, episodes_per_epoch=5, max_steps=500,
-              lr_policy=3e-4, lr_value=1e-3, gamma=0.99, lam=0.95,
-              clip_epsilon=0.2, update_epochs=10, minibatch_size=64):
+def train_ppo_mjx(
+    xml_path='g1_table_box_scene_mjx.xml',  # Changed to MJX-compatible XML
+    num_envs=128,
+    num_epochs=100,
+    steps_per_epoch=500,
+    lr_policy=3e-4,
+    lr_value=1e-3,
+    gamma=0.99,
+    lam=0.95,
+    clip_epsilon=0.2,
+    num_minibatches=4,
+    update_epochs=4,
+    save_path='ppo_mjx_policy.pkl'
+):
     """
-    Proximal Policy Optimization (PPO) - memory efficient version
-    Designed to work on limited hardware
+    Train PPO with GPU-accelerated MJX simulation
+    
+    Args:
+        xml_path: Path to MJX-compatible XML file
+        num_envs: Number of parallel environments (higher = better GPU utilization)
+        num_epochs: Number of training epochs
+        steps_per_epoch: Steps per environment per epoch
     """
-    print("Training with PPO...")
+    
+    print("="*60)
+    print("PPO Training with MuJoco Playground (GPU Accelerated)")
     print("="*60)
     print(f"Configuration:")
+    print(f"  Parallel Environments: {num_envs}")
     print(f"  Epochs: {num_epochs}")
-    print(f"  Episodes per epoch: {episodes_per_epoch}")
-    print(f"  Max steps: {max_steps}")
+    print(f"  Steps per epoch: {steps_per_epoch}")
+    print(f"  Total timesteps per epoch: {num_envs * steps_per_epoch}")
     print(f"  Policy LR: {lr_policy}")
     print(f"  Value LR: {lr_value}")
-    print(f"  Clip ε: {clip_epsilon}")
+    print(f"  Devices: {jax.devices()}")
     print("="*60)
     
-    env = G1ReachingEnv(max_episode_steps=max_steps)
+    # Initialize environment
+    env = G1ReachingEnvMJX(xml_path, num_envs=num_envs, episode_length=steps_per_epoch)
     
-    # Initialize policy and value networks
-    policy = SimpleNeuralPolicy(
-        obs_dim=env.observation_space_dim,
-        action_dim=env.action_space_dim,
-        hidden_dims=[256, 256]
-    )
-    policy.init_params(seed=42)
+    # Initialize networks
+    rng = random.PRNGKey(0)
+    rng, policy_rng, value_rng = random.split(rng, 3)
     
-    value_net = ValueNetwork(
-        obs_dim=env.observation_space_dim,
-        hidden_dims=[256, 256]
-    )
-    value_net.init_params(seed=43)
+    dummy_obs = jnp.zeros((env.observation_dim,))
     
+    policy_net = PolicyNetwork(action_dim=env.action_dim)
+    policy_params = policy_net.init(policy_rng, dummy_obs)
+    
+    value_net = ValueNetwork()
+    value_params = value_net.init(value_rng, dummy_obs)
+    
+    # Create optimizers
+    policy_optimizer = optax.adam(lr_policy)
+    policy_opt_state = policy_optimizer.init(policy_params)
+    
+    value_optimizer = optax.adam(lr_value)
+    value_opt_state = value_optimizer.init(value_params)
+    
+    # Training loop
     best_reward = -float('inf')
-    best_policy_params = policy.get_params()
     
     for epoch in range(num_epochs):
+        print(f"\n--- Epoch {epoch + 1}/{num_epochs} ---")
+        
+        # Reset environments
+        rng, reset_rng = random.split(rng)
+        data_batch = env.reset(reset_rng)
+        
         # Collect trajectories
-        all_observations = []
+        all_obs = []
         all_actions = []
-        all_advantages = []
-        all_returns = []
-        all_old_log_probs = []
+        all_rewards = []
+        all_values = []
+        all_dones = []
         
-        epoch_rewards = []
+        print(f"Collecting {steps_per_epoch} steps from {num_envs} parallel environments...")
         
-        for ep in range(episodes_per_epoch):
-            trajectory = run_episode(env, policy, max_steps=max_steps, seed=epoch*100+ep)
-            epoch_rewards.append(trajectory['total_reward'])
+        for step in range(steps_per_epoch):
+            # Get current observations
+            obs_batch = env._get_obs(data_batch)
             
-            observations = trajectory['observations']
-            actions = trajectory['actions']
-            rewards = trajectory['rewards']
+            # Get actions from policy
+            actions = policy_net.apply(policy_params, obs_batch)
             
-            # Compute values
-            values = np.array([value_net(obs) for obs in observations])
+            # Get values
+            values = value_net.apply(value_params, obs_batch)
             
-            # Compute advantages using GAE
-            advantages = compute_gae(rewards, values, gamma, lam)
-            returns = advantages + values
+            # Step environments (all parallel on GPU)
+            data_batch, next_obs, rewards, dones = env.step(data_batch, actions)
             
-            # Normalize advantages
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            # Store data
+            all_obs.append(obs_batch)
+            all_actions.append(actions)
+            all_rewards.append(rewards)
+            all_values.append(values)
+            all_dones.append(dones)
             
-            # Compute old log probabilities (Gaussian policy)
-            old_log_probs = -0.5 * np.sum(actions**2, axis=-1)
-            
-            all_observations.extend(observations)
-            all_actions.extend(actions)
-            all_advantages.extend(advantages)
-            all_returns.extend(returns)
-            all_old_log_probs.extend(old_log_probs)
+            if (step + 1) % 100 == 0:
+                avg_reward = jnp.mean(rewards)
+                print(f"  Step {step+1}/{steps_per_epoch}: Avg reward = {avg_reward:.2f}")
         
-        # Convert to arrays
-        all_observations = np.array(all_observations)
-        all_actions = np.array(all_actions)
-        all_advantages = np.array(all_advantages)
-        all_returns = np.array(all_returns)
-        all_old_log_probs = np.array(all_old_log_probs)
+        # Stack trajectories
+        all_obs = jnp.stack(all_obs)  # Shape: (steps, num_envs, obs_dim)
+        all_actions = jnp.stack(all_actions)
+        all_rewards = jnp.stack(all_rewards)
+        all_values = jnp.stack(all_values)
+        all_dones = jnp.stack(all_dones)
+        
+        # Compute advantages (vectorized over environments)
+        advantages_list = []
+        returns_list = []
+        
+        for env_idx in range(num_envs):
+            adv, ret = compute_gae(
+                all_rewards[:, env_idx],
+                all_values[:, env_idx],
+                gamma, lam
+            )
+            advantages_list.append(adv)
+            returns_list.append(ret)
+        
+        advantages = jnp.stack(advantages_list, axis=1)  # (steps, num_envs)
+        returns = jnp.stack(returns_list, axis=1)
+        
+        # Normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        
+        # Flatten batches for training
+        obs_flat = all_obs.reshape(-1, env.observation_dim)
+        actions_flat = all_actions.reshape(-1, env.action_dim)
+        advantages_flat = advantages.reshape(-1)
+        returns_flat = returns.reshape(-1)
+        
+        dataset_size = obs_flat.shape[0]
+        batch_size = dataset_size // num_minibatches
+        
+        print(f"Training on {dataset_size} timesteps...")
         
         # PPO update
-        dataset_size = len(all_observations)
-        
         for update_epoch in range(update_epochs):
             # Shuffle data
-            indices = np.random.permutation(dataset_size)
+            rng, shuffle_rng = random.split(rng)
+            perm = random.permutation(shuffle_rng, dataset_size)
             
-            # Process in minibatches
-            for start in range(0, dataset_size, minibatch_size):
-                end = min(start + minibatch_size, dataset_size)
-                batch_indices = indices[start:end]
+            for i in range(num_minibatches):
+                batch_indices = perm[i * batch_size:(i + 1) * batch_size]
                 
-                obs_batch = all_observations[batch_indices]
-                actions_batch = all_actions[batch_indices]
-                advantages_batch = all_advantages[batch_indices]
-                returns_batch = all_returns[batch_indices]
-                old_log_probs_batch = all_old_log_probs[batch_indices]
+                obs_batch = obs_flat[batch_indices]
+                actions_batch = actions_flat[batch_indices]
+                advantages_batch = advantages_flat[batch_indices]
+                returns_batch = returns_flat[batch_indices]
                 
-                # Update policy
-                policy_params = policy.get_params()
-                policy_grad = compute_policy_gradient(
-                    policy, obs_batch, actions_batch, advantages_batch,
-                    old_log_probs_batch, clip_epsilon
-                )
+                # Policy loss and update
+                def policy_loss_fn(params):
+                    pred_actions = policy_net.apply(params, obs_batch)
+                    action_diff = (pred_actions - actions_batch) ** 2
+                    loss = jnp.mean(jnp.sum(action_diff, axis=-1) * advantages_batch)
+                    return loss
                 
-                # Apply gradient descent
-                for key in policy_params:
-                    policy_params[key] -= lr_policy * policy_grad[key]
+                policy_loss, policy_grads = jax.value_and_grad(policy_loss_fn)(policy_params)
+                updates, policy_opt_state = policy_optimizer.update(policy_grads, policy_opt_state)
+                policy_params = optax.apply_updates(policy_params, updates)
                 
-                policy.set_params(policy_params)
+                # Value loss and update
+                def value_loss_fn(params):
+                    pred_values = value_net.apply(params, obs_batch)
+                    loss = jnp.mean((pred_values - returns_batch) ** 2)
+                    return loss
                 
-                # Update value network
-                value_params = value_net.get_params()
-                value_grad = compute_value_gradient(
-                    value_net, obs_batch, returns_batch
-                )
-                
-                # Apply gradient descent
-                for key in value_params:
-                    value_params[key] -= lr_value * value_grad[key]
-                
-                value_net.set_params(value_params)
+                value_loss, value_grads = jax.value_and_grad(value_loss_fn)(value_params)
+                updates, value_opt_state = value_optimizer.update(value_grads, value_opt_state)
+                value_params = optax.apply_updates(value_params, updates)
         
-        # Log progress
-        avg_reward = np.mean(epoch_rewards)
-        max_reward = np.max(epoch_rewards)
+        # Log results
+        epoch_rewards = all_rewards.mean(axis=0)  # Average over time
+        avg_reward = float(epoch_rewards.mean())
+        max_reward = float(epoch_rewards.max())
         
         if max_reward > best_reward:
             best_reward = max_reward
-            best_policy_params = policy.get_params()
-            print(f"Epoch {epoch + 1}/{num_epochs}: NEW BEST! Avg={avg_reward:.2f}, Max={max_reward:.2f}")
+            print(f"Epoch {epoch + 1}: NEW BEST! Avg={avg_reward:.2f}, Max={max_reward:.2f}")
+            
+            # Save best policy
+            with open(save_path, 'wb') as f:
+                pickle.dump({
+                    'policy_params': policy_params,
+                    'value_params': value_params,
+                    'observation_dim': env.observation_dim,
+                    'action_dim': env.action_dim
+                }, f)
+            print(f"✓ Saved to {save_path}")
         else:
-            print(f"Epoch {epoch + 1}/{num_epochs}: Avg={avg_reward:.2f}, Max={max_reward:.2f}, Best={best_reward:.2f}")
+            print(f"Epoch {epoch + 1}: Avg={avg_reward:.2f}, Max={max_reward:.2f}, Best={best_reward:.2f}")
     
-    # Restore best policy
-    policy.set_params(best_policy_params)
-    return policy
+    print("\n" + "="*60)
+    print("Training complete!")
+    print(f"Best reward: {best_reward:.2f}")
+    print(f"Policy saved to: {save_path}")
+    print("="*60)
+    
+    return policy_params, value_params
 
 
-def compute_policy_gradient(policy, observations, actions, advantages, 
-                            old_log_probs, clip_epsilon):
-    """Compute PPO policy gradient (finite differences approximation)"""
-    params = policy.get_params()
-    gradients = {key: np.zeros_like(params[key]) for key in params}
-    
-    epsilon = 1e-5
-    
-    for key in params:
-        # Flatten parameter
-        param_flat = params[key].flatten()
-        grad_flat = np.zeros_like(param_flat)
-        
-        # Compute gradient using finite differences (only sample a subset for efficiency)
-        sample_size = min(len(param_flat), 100)
-        sample_indices = np.random.choice(len(param_flat), sample_size, replace=False)
-        
-        for idx in sample_indices:
-            # Perturb parameter
-            param_flat[idx] += epsilon
-            params[key] = param_flat.reshape(params[key].shape)
-            policy.set_params(params)
-            
-            # Compute loss with perturbation
-            loss_plus = compute_ppo_loss(policy, observations, actions, advantages, 
-                                        old_log_probs, clip_epsilon)
-            
-            # Restore and perturb in opposite direction
-            param_flat[idx] -= 2 * epsilon
-            params[key] = param_flat.reshape(params[key].shape)
-            policy.set_params(params)
-            
-            loss_minus = compute_ppo_loss(policy, observations, actions, advantages,
-                                         old_log_probs, clip_epsilon)
-            
-            # Compute gradient
-            grad_flat[idx] = (loss_plus - loss_minus) / (2 * epsilon)
-            
-            # Restore parameter
-            param_flat[idx] += epsilon
-        
-        gradients[key] = grad_flat.reshape(params[key].shape)
-    
-    # Restore original parameters
-    policy.set_params(params)
-    
-    return gradients
-
-
-def compute_value_gradient(value_net, observations, returns):
-    """Compute value network gradient (finite differences)"""
-    params = value_net.get_params()
-    gradients = {key: np.zeros_like(params[key]) for key in params}
-    
-    epsilon = 1e-5
-    
-    for key in params:
-        param_flat = params[key].flatten()
-        grad_flat = np.zeros_like(param_flat)
-        
-        # Sample subset for efficiency
-        sample_size = min(len(param_flat), 100)
-        sample_indices = np.random.choice(len(param_flat), sample_size, replace=False)
-        
-        for idx in sample_indices:
-            # Perturb parameter
-            param_flat[idx] += epsilon
-            params[key] = param_flat.reshape(params[key].shape)
-            value_net.set_params(params)
-            
-            # Compute loss
-            loss_plus = compute_value_loss(value_net, observations, returns)
-            
-            param_flat[idx] -= 2 * epsilon
-            params[key] = param_flat.reshape(params[key].shape)
-            value_net.set_params(params)
-            
-            loss_minus = compute_value_loss(value_net, observations, returns)
-            
-            # Gradient
-            grad_flat[idx] = (loss_plus - loss_minus) / (2 * epsilon)
-            
-            # Restore
-            param_flat[idx] += epsilon
-        
-        gradients[key] = grad_flat.reshape(params[key].shape)
-    
-    value_net.set_params(params)
-    return gradients
-
-
-def compute_ppo_loss(policy, observations, actions, advantages, old_log_probs, clip_epsilon):
-    """Compute PPO clipped objective"""
-    # Compute new log probs (simplified Gaussian policy)
-    new_log_probs = []
-    for obs, action in zip(observations, actions):
-        pred_action = policy(obs)
-        log_prob = -0.5 * np.sum((action - pred_action)**2)
-        new_log_probs.append(log_prob)
-    
-    new_log_probs = np.array(new_log_probs)
-    
-    # Compute ratio
-    ratio = np.exp(new_log_probs - old_log_probs)
-    
-    # Clipped objective
-    clipped_ratio = np.clip(ratio, 1 - clip_epsilon, 1 + clip_epsilon)
-    loss = -np.mean(np.minimum(ratio * advantages, clipped_ratio * advantages))
-    
-    return loss
-
-
-def compute_value_loss(value_net, observations, returns):
-    """Compute value function MSE loss"""
-    predictions = np.array([value_net(obs) for obs in observations])
-    loss = np.mean((predictions - returns)**2)
-    return loss
-
-
-def save_policy(policy, filename='trained_policy.pkl'):
-    """Save trained policy to disk"""
-    data = {
-        'policy_type': type(policy).__name__,
-        'params': policy.get_params(),
-        'obs_dim': policy.obs_dim if hasattr(policy, 'obs_dim') else None,
-        'action_dim': policy.action_dim if hasattr(policy, 'action_dim') else None,
-        'hidden_dims': policy.hidden_dims if hasattr(policy, 'hidden_dims') else None,
-    }
-    
-    with open(filename, 'wb') as f:
-        pickle.dump(data, f)
-    
-    print(f"Policy saved to {filename}")
-
-
-def load_policy(filename='trained_policy.pkl'):
-    """Load trained policy from disk"""
-    with open(filename, 'rb') as f:
-        data = pickle.load(f)
-    
-    if data['policy_type'] == 'SimpleNeuralPolicy':
-        policy = SimpleNeuralPolicy(
-            obs_dim=data['obs_dim'],
-            action_dim=data['action_dim'],
-            hidden_dims=data['hidden_dims']
-        )
-        policy.set_params(data['params'])
-    else:
-        raise ValueError(f"Unknown policy type: {data['policy_type']}")
-    
-    print(f"Policy loaded from {filename}")
-    return policy
-
-
-
-# Main code for training
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Train G1 reaching policy')
-    parser.add_argument('--mode', type=str, default='ppo',
-                        choices=['random', 'es', 'ppo'],
-                        help='Training algorithm: random, es (evolutionary strategy), or ppo')
-    parser.add_argument('--episodes', type=int, default=10,
-                        help='Number of episodes (for random/es) or epochs (for ppo)')
-    parser.add_argument('--max_steps', type=int, default=500,
-                        help='Maximum steps per episode')
-    parser.add_argument('--save', type=str, default=None,
-                        help='Filename to save trained policy')
-    parser.add_argument('--load', type=str, default=None,
-                        help='Filename to load pretrained policy')
+    import argparse
     
-    # ES params
-    parser.add_argument('--learning_rate', type=float, default=0.1,
-                        help='Learning rate for evolutionary strategy')
-    parser.add_argument('--population_size', type=int, default=10,
-                        help='Population size for evolutionary strategy')
-    
-    # PPO params
-    parser.add_argument('--episodes_per_epoch', type=int, default=5,
-                        help='Episodes per epoch for PPO')
+    parser = argparse.ArgumentParser(description='Train G1 reaching with GPU-accelerated MJX')
+    parser.add_argument('--xml_path', type=str, default='g1_table_box_scene.xml',
+                        help='Path to MuJoCo XML file')
+    parser.add_argument('--num_envs', type=int, default=128,
+                        help='Number of parallel environments (GPU batch size)')
+    parser.add_argument('--epochs', type=int, default=100,
+                        help='Number of training epochs')
+    parser.add_argument('--steps_per_epoch', type=int, default=500,
+                        help='Steps per environment per epoch')
     parser.add_argument('--lr_policy', type=float, default=3e-4,
-                        help='Policy learning rate for PPO')
+                        help='Policy learning rate')
     parser.add_argument('--lr_value', type=float, default=1e-3,
-                        help='Value learning rate for PPO')
-    parser.add_argument('--clip_epsilon', type=float, default=0.2,
-                        help='PPO clipping parameter')
+                        help='Value learning rate')
+    parser.add_argument('--save', type=str, default='ppo_mjx_policy.pkl',
+                        help='Path to save trained policy')
     
     args = parser.parse_args()
     
-    if args.load:
-        # Load and test a pretrained policy
-        policy = load_policy(args.load)
-        env = G1ReachingEnv(max_episode_steps=args.max_steps)
-        
-        print("\nTesting loaded policy...")
-        trajectory = run_episode(env, policy, max_steps=args.max_steps)
-        print(f"Total Reward: {trajectory['total_reward']:.2f}")
-        print(f"Episode Length: {trajectory['episode_length']}")
-        print(f"Final Distance: {trajectory['infos'][-1]['distance']:.4f}m")
-    
-    elif args.mode == 'random':
-        results, policy = train_random_policy(
-            num_episodes=args.episodes,
-            max_steps=args.max_steps
-        )
-    
-    elif args.mode == 'es':
-        policy = train_evolutionary_strategy(
-            num_episodes=args.episodes,
-            max_steps=args.max_steps,
-            learning_rate=args.learning_rate,
-            population_size=args.population_size
-        )
-        
-        if args.save:
-            save_policy(policy, args.save)
-        
-        print("\nTraining complete!")
-    
-    elif args.mode == 'ppo':
-        policy = train_ppo(
-            num_epochs=args.episodes,  # Reuse episodes arg as epochs
-            episodes_per_epoch=args.episodes_per_epoch,
-            max_steps=args.max_steps,
-            lr_policy=args.lr_policy,
-            lr_value=args.lr_value,
-            clip_epsilon=args.clip_epsilon
-        )
-        
-        if args.save:
-            save_policy(policy, args.save)
-        
-        print("\nPPO Training complete!")
-        print("Run visualization with:")
-        print(f"  python g1_reaching_visualize.py --mode trained --policy {args.save or 'trained_policy.pkl'}")
+    # Train
+    policy_params, value_params = train_ppo_mjx(
+        xml_path=args.xml_path,
+        num_envs=args.num_envs,
+        num_epochs=args.epochs,
+        steps_per_epoch=args.steps_per_epoch,
+        lr_policy=args.lr_policy,
+        lr_value=args.lr_value,
+        save_path=args.save
+    )

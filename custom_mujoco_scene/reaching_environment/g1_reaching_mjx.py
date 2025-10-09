@@ -274,7 +274,7 @@ def compute_gae(rewards, values, gamma=0.99, lam=0.95):
 
 
 def train_ppo_mjx(
-    xml_path='g1_table_box_scene.xml',
+    xml_path='g1_table_box_scene_mjx.xml',  # Changed to MJX-compatible XML
     num_envs=128,
     num_epochs=100,
     steps_per_epoch=500,
@@ -291,6 +291,7 @@ def train_ppo_mjx(
     Train PPO with GPU-accelerated MJX simulation
     
     Args:
+        xml_path: Path to MJX-compatible XML file
         num_envs: Number of parallel environments (higher = better GPU utilization)
         num_epochs: Number of training epochs
         steps_per_epoch: Steps per environment per epoch
