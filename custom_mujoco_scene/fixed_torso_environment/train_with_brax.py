@@ -23,17 +23,14 @@ try:
     from brax.training.agents.ppo import networks as ppo_networks
     from brax import envs
     from brax.envs.base import State, Env, PipelineEnv
-    print("✅ Brax imported successfully")
+    print("Brax imported successfully")
 except ImportError as e:
-    print(f"❌ Error importing Brax: {e}")
+    print(f"Error importing Brax: {e}")
     print("\nInstalling required packages...")
     print("Run: pip install brax==0.10.5 jax jaxlib")
     exit(1)
 
-
-# ============================================================================
 # G1 Reaching Environment for Brax
-# ============================================================================
 
 class G1ReachingBraxEnv(PipelineEnv):
     """
@@ -68,15 +65,15 @@ class G1ReachingBraxEnv(PipelineEnv):
             self.hand_site_id = mujoco.mj_name2id(
                 mj_model, mujoco.mjtObj.mjOBJ_SITE, "right_palm"
             )
-            print(f"✅ Found hand site: right_palm (id={self.hand_site_id})")
+            print(f"Found hand site: right_palm (id={self.hand_site_id})")
         except:
-            print("⚠️  Warning: 'right_palm' site not found, searching for alternatives...")
+            print("Warning: 'right_palm' site not found, searching for alternatives...")
             # Try to find any hand-related site
             for i in range(mj_model.nsite):
                 site_name = mujoco.mj_id2name(mj_model, mujoco.mjtObj.mjOBJ_SITE, i)
                 if site_name and ('hand' in site_name.lower() or 'palm' in site_name.lower()):
                     self.hand_site_id = i
-                    print(f"✅ Using site: {site_name} (id={i})")
+                    print(f"Using site: {site_name} (id={i})")
                     break
         
         # Find target body
@@ -84,10 +81,22 @@ class G1ReachingBraxEnv(PipelineEnv):
             self.target_body_id = mujoco.mj_name2id(
                 mj_model, mujoco.mjtObj.mjOBJ_BODY, "red_box"
             )
-            print(f"✅ Found target: red_box (id={self.target_body_id})")
+            print(f"Found target: red_box (id={self.target_body_id})")
         except:
-            print("❌ Error: 'red_box' body not found")
-            raise
+            print("Warning: 'red_box' body not found, trying alternatives...")
+            # Try alternative names
+            for name in ['red_box', 'redbox', 'target_box', 'box_red']:
+                try:
+                    self.target_body_id = mujoco.mj_name2id(
+                        mj_model, mujoco.mjtObj.mjOBJ_BODY, name
+                    )
+                    print(f"Found target: {name} (id={self.target_body_id})")
+                    break
+                except:
+                    continue
+            else:
+                print("Error: Could not find target body")
+                raise
         
         # Find controllable actuators (right arm + torso)
         self.controllable_indices = []
@@ -99,7 +108,7 @@ class G1ReachingBraxEnv(PipelineEnv):
             ]):
                 self.controllable_indices.append(i)
         
-        print(f"✅ Controllable actuators: {len(self.controllable_indices)}/{mj_model.nu}")
+        print(f"Controllable actuators: {len(self.controllable_indices)}/{mj_model.nu}")
         print(f"{'='*70}\n")
         
         sys = mjx.put_model(mj_model)
@@ -142,22 +151,26 @@ class G1ReachingBraxEnv(PipelineEnv):
         # Get observation
         obs = self._get_obs(pipeline_state)
         
-        # Calculate reward
+        # Calculate reward - IMPROVED REWARD SHAPING
         hand_pos = pipeline_state.site_xpos[self.hand_site_id]
         target_pos = pipeline_state.xpos[self.target_body_id]
         distance = jnp.linalg.norm(hand_pos - target_pos)
-        
-        # Dense reward: negative distance + bonuses
+
+        # 1. Dense distance reward (main signal)
         reward = -distance
-        reward = jnp.where(distance < 0.1, reward + 1.0, reward)
-        reward = jnp.where(distance < 0.05, reward + 5.0, reward)
-        
-        # Small penalty for large actions
+
+        # 2. Proximity bonuses (shaped reward for getting close)
+        reward = jnp.where(distance < 0.3, reward + 0.5, reward)   # Within 30cm
+        reward = jnp.where(distance < 0.15, reward + 1.0, reward)  # Within 15cm
+        reward = jnp.where(distance < 0.12, reward + 2.0, reward)  # Within 12cm (success threshold)
+        reward = jnp.where(distance < 0.08, reward + 5.0, reward)  # Very close
+
+        # 3. Small penalty for large actions (encourage smooth movements)
         action_penalty = 0.001 * jnp.sum(action ** 2)
         reward = reward - action_penalty
-        
-        # Check success
-        success = distance < 0.05
+
+        # Check success (12cm threshold - more realistic)
+        success = distance < 0.12
         done = success
         
         metrics = {
@@ -210,9 +223,7 @@ class G1ReachingBraxEnv(PipelineEnv):
         return len(self.controllable_indices)
 
 
-# ============================================================================
 # Training Function
-# ============================================================================
 
 def train_g1_reaching(
     scene_path: str = "../unitree_g1/g1_table_box_scene.xml",
@@ -275,7 +286,7 @@ def train_g1_reaching(
             f"SPS: {steps_per_sec:>6,.0f}"
         )
     
-    print("\n🚀 Starting Brax PPO training...")
+    print("\nStarting Brax PPO training...")
     print("This uses GPU/TPU acceleration via JAX\n")
     
     # Train
@@ -300,7 +311,7 @@ def train_g1_reaching(
     )
     
     print("\n" + "="*70)
-    print("✅ TRAINING COMPLETE!")
+    print("TRAINING COMPLETE!")
     print("="*70)
     
     # Save policy
@@ -314,14 +325,12 @@ def train_g1_reaching(
             'make_inference_fn': make_inference_fn,
         }, f)
     
-    print(f"\n💾 Policy saved to: {policy_path}")
-    
+    print(f"\nPolicy saved to: {policy_path}")
+
     return make_inference_fn, params
 
 
-# ============================================================================
 # Main
-# ============================================================================
 
 if __name__ == "__main__":
     import argparse
@@ -345,7 +354,7 @@ if __name__ == "__main__":
     
     # Check scene file exists
     if not os.path.exists(args.scene):
-        print(f"❌ Error: Scene file not found: {args.scene}")
+        print(f"Error: Scene file not found: {args.scene}")
         exit(1)
     
     # Train
@@ -358,4 +367,4 @@ if __name__ == "__main__":
         seed=args.seed,
     )
     
-    print("\n✨ Done! Your policy is ready to use.")
+    print("\n[SUCCESS] Training complete. Policy is ready to use.")

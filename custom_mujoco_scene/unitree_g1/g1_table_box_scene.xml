@@ -164,24 +164,24 @@
             contype="1" conaffinity="1"/>
     </body>
     
-    <!-- Target: Red box (main manipulation target) -->
-    <body name="red_box" pos="0.7 0 0.74">
+    <!-- Target: Red box (main manipulation target) - moved closer -->
+    <body name="red_box" pos="0.5 0 0.74">
       <joint name="red_box_joint" type="free"/>
-      <geom name="red_box_geom" type="box" size="0.04 0.04 0.04" material="box_red" mass="0.2" 
+      <geom name="red_box_geom" type="box" size="0.04 0.04 0.04" material="box_red" mass="0.2"
             contype="1" conaffinity="1"/>
       <site name="red_box_site" pos="0 0 0" size="0.02" rgba="1 0 0 0.5"/>
     </body>
 
-    <!-- Other objects -->
-    <body name="blue_box" pos="0.4 0 0.75">
+    <!-- Other objects - moved closer -->
+    <body name="blue_box" pos="0.3 0 0.75">
       <joint name="blue_box_joint" type="free"/>
-      <geom name="blue_box_geom" type="box" size="0.05 0.03 0.1" material="box_blue" mass="0.2" 
+      <geom name="blue_box_geom" type="box" size="0.05 0.03 0.1" material="box_blue" mass="0.2"
             contype="1" conaffinity="1"/>
     </body>
-   
-    <body name="green_box" pos="0.35 0.25 0.74">
+
+    <body name="green_box" pos="0.25 0.2 0.74">
       <joint name="green_box_joint" type="free"/>
-      <geom name="green_box_geom" type="box" size="0.04 0.04 0.04" material="box_green" mass="0.2" 
+      <geom name="green_box_geom" type="box" size="0.04 0.04 0.04" material="box_green" mass="0.2"
             contype="1" conaffinity="1"/>
     </body>
     

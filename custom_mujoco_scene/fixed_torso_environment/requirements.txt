@@ -1,0 +1,17 @@
+# Core dependencies for G1 Reaching Task Training
+# Install with: pip install -r requirements.txt
+
+# Essential packages
+numpy>=1.23.0
+matplotlib>=3.5.0
+mujoco>=3.0.0
+
+# Optional: For GPU-accelerated training with Brax
+# Uncomment these lines if you have a GPU and want faster training:
+# jax[cuda12]>=0.4.0  # For NVIDIA GPUs with CUDA 12
+# brax==0.10.5
+
+# Optional: CPU-only JAX and Brax
+# Uncomment if you want to use Brax but don't have a GPU:
+# jax[cpu]>=0.4.0
+# brax==0.10.5

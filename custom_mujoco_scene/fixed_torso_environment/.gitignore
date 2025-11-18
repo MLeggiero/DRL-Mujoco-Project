@@ -1,0 +1,34 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# MuJoCo logs
+MUJOCO_LOG.TXT
+mujoco_log.txt
+
+# Training outputs
+models/
+logs/
+*.pkl
+*.png
+
+# Backups
+*.backup
+*.bak
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Virtual environments
+venv/
+env/
+mujoco_env/
+
+# OS
+.DS_Store
+Thumbs.db

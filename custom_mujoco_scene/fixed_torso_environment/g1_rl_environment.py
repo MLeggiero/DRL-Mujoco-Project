@@ -11,33 +11,48 @@ import os
 class G1ReachTouchEnv:
     def __init__(self, scene_path="../unitree_g1/g1_table_box_scene.xml"):
         """Initialize the G1 reach and touch environment"""
-        
+
         self.scene_path = scene_path
         print(f"Using scene file: {self.scene_path}")
-        
+
         # Check if scene file exists
         if not os.path.exists(self.scene_path):
             raise FileNotFoundError(f"Scene file not found: {self.scene_path}")
-            
+
         self.model = None
         self.data = None
         self.viewer = None
-        
+
         # Environment parameters
-        self.max_episode_steps = 1000
+        # 400 steps with 0.3 action scaling (balanced speed and control)
+        self.max_episode_steps = 400
         self.current_step = 0
-        
+
         # Robot configuration
         self.initial_robot_pos = [-0.1, 0.0, 0.8]
-        
-        # Target objects (matching your XML file)
-        self.target_objects = ['red_box', 'blue_cylinder', 'blue_cylinder2', 'green_cone']
+
+        # Target objects (matching XML file)
+        self.target_objects = ['red_box'] 
         self.current_target = None
-        
+
         # Reward parameters
-        self.success_distance = 0.08  # How close to consider "touching"
+        self.success_distance = 0.05  # How close to consider "touching" the target (3 cm)
         self.last_distance = None
-        
+        self.last_action = None  # Track previous action for smoothness penalty
+
+        # Reward scaling parameters
+        self.typical_start_distance = 0.7  # Typical distance at episode start (meters)
+
+        # Observation space indices (will be set after model loads)
+        self.right_arm_qpos_indices = []
+        self.torso_qpos_indices = []
+        self.right_arm_qvel_indices = []
+        self.torso_qvel_indices = []
+
+        # Floating base stabilization (will be set after reset)
+        self.floating_base_qpos_addr = None
+        self.initial_floating_base_qpos = None
+
         # Vision parameters
         self.camera_width = 640
         self.camera_height = 480
@@ -59,58 +74,108 @@ class G1ReachTouchEnv:
         """Identify and map G1 actuators for right arm and torso control only"""
         self.controllable_actuators = []
         self.leg_actuators = []
-        
+        self.leg_joint_ids = []  # Track leg joint IDs for position locking
+        self.initial_leg_qpos = {}  # Store initial leg positions
+
         # Find right arm and torso actuators, identify legs to lock
         for i in range(self.model.nu):
             actuator_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
             if actuator_name:
                 actuator_lower = actuator_name.lower()
-                
+
                 # Lock all leg actuators (don't add to controllable list)
                 if any(leg_part in actuator_lower for leg_part in ['hip', 'knee', 'ankle', 'leg']):
                     self.leg_actuators.append(i)
+                    # Get the joint this actuator controls
+                    joint_id = self.model.actuator_trnid[i, 0]
+                    if joint_id >= 0 and joint_id not in self.leg_joint_ids:
+                        self.leg_joint_ids.append(joint_id)
                     continue
-                
+
                 # Control right arm actuators
                 if 'right' in actuator_lower and any(arm_part in actuator_lower for arm_part in ['shoulder', 'elbow', 'wrist', 'arm']):
                     self.controllable_actuators.append(i)
-                    
+
                 # Control torso/waist actuators (helps with reaching)
                 elif any(torso_part in actuator_lower for torso_part in ['torso', 'waist', 'spine']):
                     self.controllable_actuators.append(i)
-        
+
         print(f"Controllable actuators (right arm + torso): {len(self.controllable_actuators)} actuators")
         print(f"Locked leg actuators: {len(self.leg_actuators)} actuators")
-        
+        print(f"Locked leg joints: {len(self.leg_joint_ids)} joints")
+
         # Get total controllable actuators (right arm + torso only)
         self.n_actions = len(self.controllable_actuators)
         if self.n_actions == 0:
             print("WARNING: No arm/torso actuators found - using first 6 actuators")
             self.n_actions = min(self.model.nu, 6)
             self.controllable_actuators = list(range(self.n_actions))
-    
+
+        # IMPORTANT: Map joint indices for observations (so we can observe what we control!)
+        self._map_joint_indices()
+
+    def _map_joint_indices(self):
+        """Map joint indices for right arm and torso to include in observations"""
+        self.right_arm_qpos_indices = []
+        self.torso_qpos_indices = []
+        self.right_arm_qvel_indices = []
+        self.torso_qvel_indices = []
+
+        for i in range(self.model.njnt):
+            joint_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i)
+            if joint_name:
+                joint_lower = joint_name.lower()
+
+                # Find right arm joints
+                if 'right' in joint_lower and any(part in joint_lower for part in ['shoulder', 'elbow', 'wrist', 'arm']):
+                    if self.model.jnt_type[i] == mujoco.mjtJoint.mjJNT_HINGE:
+                        qpos_addr = self.model.jnt_qposadr[i]
+                        qvel_addr = self.model.jnt_dofadr[i]
+                        self.right_arm_qpos_indices.append(qpos_addr)
+                        self.right_arm_qvel_indices.append(qvel_addr)
+
+                # Find torso joints
+                elif any(part in joint_lower for part in ['torso', 'waist', 'spine']):
+                    if self.model.jnt_type[i] == mujoco.mjtJoint.mjJNT_HINGE:
+                        qpos_addr = self.model.jnt_qposadr[i]
+                        qvel_addr = self.model.jnt_dofadr[i]
+                        self.torso_qpos_indices.append(qpos_addr)
+                        self.torso_qvel_indices.append(qvel_addr)
+
+        print(f"Right arm qpos indices for observation: {self.right_arm_qpos_indices}")
+        print(f"Right arm qvel indices for observation: {self.right_arm_qvel_indices}")
+        print(f"Torso qpos indices for observation: {self.torso_qpos_indices}")
+        print(f"Torso qvel indices for observation: {self.torso_qvel_indices}")
+
     def reset(self, target_object=None) -> Dict:
         """Reset the environment to initial state"""
         self.current_step = 0
-        
-        # Reset robot to initial pose
+
+        # Reset to initial configuration from XML
+        mujoco.mj_resetData(self.model, self.data)
+
+        # Reset robot to initial pose (after mj_resetData)
         self._reset_robot_pose()
-        
+
         # Choose target object
         if target_object is None:
             self.current_target = np.random.choice(self.target_objects)
         else:
             self.current_target = target_object
-            
-        # Reset object positions (add some randomization)
+
+        # Add small randomization to object positions (optional)
         self._randomize_object_positions()
-        
+
         # Forward simulation to update state
         mujoco.mj_forward(self.model, self.data)
-        
+
+        # Reset reward tracking
+        self.last_distance = None
+        self.last_action = None
+
         # Get initial observation
         obs = self._get_observation()
-        
+
         print(f"Episode reset - Target: {self.current_target}")
         return obs
     
@@ -127,9 +192,16 @@ class G1ReachTouchEnv:
             joint_lower = joint_name.lower()
             
             if joint_type == mujoco.mjtJoint.mjJNT_FREE and qpos_addr + 6 < self.model.nq:
-                # Free joint: standing position
-                self.data.qpos[qpos_addr:qpos_addr+3] = self.initial_robot_pos
-                self.data.qpos[qpos_addr+3:qpos_addr+7] = [1, 0, 0, 0]  # Quaternion
+                # Only modify robot's floating base, not object free joints
+                if 'floating_base' in joint_lower or 'base' in joint_lower or 'pelvis' in joint_lower:
+                    # Robot floating base: set to standing position
+                    self.data.qpos[qpos_addr:qpos_addr+3] = self.initial_robot_pos
+                    self.data.qpos[qpos_addr+3:qpos_addr+7] = [1, 0, 0, 0]  # Quaternion
+
+                    # Save floating base info
+                    self.floating_base_qpos_addr = qpos_addr
+                    self.initial_floating_base_qpos = self.data.qpos[qpos_addr:qpos_addr+7].copy()
+                # Skip object free joints - they were already set correctly by mj_resetData
                 
             elif joint_type == mujoco.mjtJoint.mjJNT_HINGE and qpos_addr < self.model.nq:
                 # Set joint positions - legs locked, arms movable
@@ -166,12 +238,18 @@ class G1ReachTouchEnv:
                 # TORSO - Neutral
                 elif any(part in joint_lower for part in ['torso', 'waist', 'spine']):
                     self.data.qpos[qpos_addr] = 0.0
-                    
+
                 else:
                     self.data.qpos[qpos_addr] = 0.0
+
+        # Store initial leg positions for locking during simulation
+        self.initial_leg_qpos.clear()
+        for joint_id in self.leg_joint_ids:
+            qpos_addr = self.model.jnt_qposadr[joint_id]
+            self.initial_leg_qpos[joint_id] = self.data.qpos[qpos_addr]
     
     def _randomize_object_positions(self):
-        """Add small random variations to object positions"""
+        """Add significant random variations to object positions for generalization"""
         for obj_name in self.target_objects:
             body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, obj_name)
             if body_id >= 0:
@@ -180,31 +258,61 @@ class G1ReachTouchEnv:
                     if self.model.jnt_bodyid[i] == body_id and self.model.jnt_type[i] == mujoco.mjtJoint.mjJNT_FREE:
                         qpos_addr = self.model.jnt_qposadr[i]
                         if qpos_addr + 6 < self.model.nq:
-                            # Add small random offset (+/-3cm)
-                            original_pos = self.data.qpos[qpos_addr:qpos_addr+3].copy()
-                            noise = np.random.uniform(-0.03, 0.03, 3)
-                            noise[2] = max(0, noise[2])  # Don't go below table
-                            self.data.qpos[qpos_addr:qpos_addr+3] = original_pos + noise
+                            # Randomize position in a reachable region
+                            # X: 0.4m to 0.6m (forward distance)
+                            # Y: -0.15m to +0.15m (left/right)
+                            # Z: On table (0.74m)
+                            x = np.random.uniform(0.35, 0.65)
+                            y = np.random.uniform(-0.2, 0.2)
+                            z = 0.74  # Table height
+                            self.data.qpos[qpos_addr:qpos_addr+3] = [x, y, z]
                         break
     
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, Dict]:
         """Execute one environment step"""
         # Clip action to reasonable range
         action = np.clip(action, -1, 1)
-        
+
         # Apply action to robot actuators
         self._apply_action(action)
-        
+
         # Step simulation multiple times for stability
         for _ in range(5):  # 5 simulation steps per RL step
+            # Lock BEFORE step: floating base and legs
+            if self.floating_base_qpos_addr is not None and self.initial_floating_base_qpos is not None:
+                self.data.qpos[self.floating_base_qpos_addr:self.floating_base_qpos_addr+7] = self.initial_floating_base_qpos
+                dof_start = 18  # Floating base starts at DOF 18 (from debug output)
+                self.data.qvel[dof_start:dof_start+6] = 0.0
+
+            # Lock leg joints before step
+            for joint_id, initial_pos in self.initial_leg_qpos.items():
+                qpos_addr = self.model.jnt_qposadr[joint_id]
+                qvel_addr = self.model.jnt_dofadr[joint_id]
+                self.data.qpos[qpos_addr] = initial_pos
+                self.data.qvel[qvel_addr] = 0.0
+
+            # Step physics
             mujoco.mj_step(self.model, self.data)
+
+            # Lock AFTER step: re-enforce constraints to counteract physics
+            if self.floating_base_qpos_addr is not None and self.initial_floating_base_qpos is not None:
+                self.data.qpos[self.floating_base_qpos_addr:self.floating_base_qpos_addr+7] = self.initial_floating_base_qpos
+                dof_start = 18
+                self.data.qvel[dof_start:dof_start+6] = 0.0
+
+            # Lock leg joints after step (critical for preventing flailing)
+            for joint_id, initial_pos in self.initial_leg_qpos.items():
+                qpos_addr = self.model.jnt_qposadr[joint_id]
+                qvel_addr = self.model.jnt_dofadr[joint_id]
+                self.data.qpos[qpos_addr] = initial_pos
+                self.data.qvel[qvel_addr] = 0.0
         
         # Get observation
         obs = self._get_observation()
-        
-        # Calculate reward
-        reward = self._calculate_reward()
-        
+
+        # Calculate reward (pass action for smoothness penalty)
+        reward = self._calculate_reward(action)
+
         # Check if episode is done
         done = self._check_done()
         
@@ -221,34 +329,54 @@ class G1ReachTouchEnv:
     
     def _apply_action(self, action):
         """Apply RL action to right arm and torso actuators only"""
-        
+
+        # Clip actions to prevent wild movements
+        action = np.clip(action, -1.0, 1.0)
+
         # Apply action only to controllable actuators (right arm + torso)
+        # Higher torque scaling to encourage full arm extension (including elbow)
         for i, actuator_id in enumerate(self.controllable_actuators):
             if i < len(action):
-                self.data.ctrl[actuator_id] = action[i] * 10.0  # Scale torque
-        
-        # Keep leg actuators at zero (locked in standing position)
+                self.data.ctrl[actuator_id] = action[i] * 0.4  # Strong enough for elbow
+
+        # IMPORTANT: Set leg actuator controls to ZERO
+        # Legs should be completely still - no torques applied
+        # The fixed base position handles stability, not actuator torques
         for leg_actuator_id in self.leg_actuators:
             self.data.ctrl[leg_actuator_id] = 0.0
     
     def _get_observation(self) -> Dict:
-        """Get current observation (robot state + task info)"""
+        """Get current observation (robot state + task info) - IMPROVED TO INCLUDE RIGHT ARM"""
         obs = {}
-        
-        # Robot proprioceptive state (limited to prevent huge observation space)
-        obs['robot_qpos'] = self.data.qpos[:min(20, self.model.nq)].copy()
-        obs['robot_qvel'] = self.data.qvel[:min(20, self.model.nv)].copy()
-        
-        # Target object position
+
+        # Collect relevant joint positions and velocities (right arm + torso only)
+        qpos_indices = self.right_arm_qpos_indices + self.torso_qpos_indices
+        qvel_indices = self.right_arm_qvel_indices + self.torso_qvel_indices
+
+        if len(qpos_indices) > 0 and len(qvel_indices) > 0:
+            # Get positions for controllable joints
+            obs['robot_qpos'] = self.data.qpos[qpos_indices].copy()
+            # Get velocities for controllable joints (using proper qvel indices)
+            obs['robot_qvel'] = self.data.qvel[qvel_indices].copy()
+        else:
+            # Fallback: if joint mapping failed, use first 10 joints
+            print("Warning: Using fallback observation (first 10 joints)")
+            obs['robot_qpos'] = self.data.qpos[:10].copy()
+            obs['robot_qvel'] = self.data.qvel[:10].copy()
+
+        # End-effector position (3D)
+        obs['end_effector_pos'] = self._get_end_effector_position()
+
+        # Target object position (3D)
         target_pos = self._get_target_position()
         obs['target_position'] = target_pos
-        
-        # End-effector position
-        obs['end_effector_pos'] = self._get_end_effector_position()
-        
-        # Distance to target
+
+        # Relative vector from hand to target (3D) - very important for learning!
+        obs['hand_to_target'] = target_pos - obs['end_effector_pos']
+
+        # Distance to target (scalar)
         obs['distance_to_target'] = self._get_distance_to_target()
-        
+
         return obs
     
     def _get_target_position(self) -> np.ndarray:
@@ -259,49 +387,65 @@ class G1ReachTouchEnv:
         return np.zeros(3)
     
     def _get_end_effector_position(self) -> np.ndarray:
-        """Get position of robot's right arm end effector (hand/wrist)"""
-        # Try to find RIGHT hand/wrist body specifically
-        right_hand_names = [
-            'right_hand', 'right_wrist', 'hand_right', 'wrist_right', 
-            'r_hand', 'r_wrist', 'right_end_effector', 'right_palm',
-            'hand_r', 'wrist_r'
-        ]
-        
-        for hand_name in right_hand_names:
-            hand_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, hand_name)
-            if hand_id >= 0:
-                # Only print this once during initialization
-                if not hasattr(self, '_end_effector_logged'):
-                    print(f"Using end effector: {hand_name} (body_id={hand_id})")
-                    self._end_effector_logged = True
-                return self.data.xpos[hand_id].copy()
-        
-        # Fallback: search for any body with 'right' and 'hand' or 'wrist'
-        if not hasattr(self, '_end_effector_search_logged'):
-            print("Searching for right arm end effector in body names...")
-            self._end_effector_search_logged = True
-            
-        for body_id in range(self.model.nbody):
-            body_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body_id)
-            if body_name:
-                body_lower = body_name.lower()
-                if 'right' in body_lower and ('hand' in body_lower or 'wrist' in body_lower):
-                    if not hasattr(self, '_end_effector_fallback_logged'):
-                        print(f"Found right arm end effector: {body_name} (body_id={body_id})")
-                        self._end_effector_fallback_logged = True
-                    return self.data.xpos[body_id].copy()
-        
-        # Last resort: use a body index that's likely to be near the arm
-        if not hasattr(self, '_end_effector_warning_logged'):
-            print("WARNING: Could not find right hand/wrist - using approximate body index")
-            self._end_effector_warning_logged = True
-            
-        if self.model.nbody > 15:
-            return self.data.xpos[15].copy()
-        elif self.model.nbody > 10:
-            return self.data.xpos[10].copy()
-        
-        return np.zeros(3)
+        """Get position of robot's right arm end effector (hand/wrist) - IMPROVED"""
+        # Cache the end effector ID after first successful lookup
+        if not hasattr(self, '_end_effector_id'):
+            self._end_effector_id = None
+
+            # Try to find RIGHT hand/wrist SITE first (sites are more accurate)
+            right_hand_site_names = [
+                'right_palm', 'right_hand_site', 'right_end_effector',
+                'right_wrist_site', 'r_palm', 'palm_right'
+            ]
+
+            for site_name in right_hand_site_names:
+                try:
+                    site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+                    if site_id >= 0:
+                        self._end_effector_id = ('site', site_id)
+                        print(f"Using end effector SITE: {site_name} (id={site_id})")
+                        break
+                except:
+                    pass
+
+            # If no site found, try bodies
+            if self._end_effector_id is None:
+                right_hand_names = [
+                    'right_hand', 'right_wrist', 'hand_right', 'wrist_right',
+                    'r_hand', 'r_wrist', 'right_palm', 'hand_r', 'wrist_r'
+                ]
+
+                for hand_name in right_hand_names:
+                    hand_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, hand_name)
+                    if hand_id >= 0:
+                        self._end_effector_id = ('body', hand_id)
+                        print(f"Using end effector BODY: {hand_name} (id={hand_id})")
+                        break
+
+            # Fallback: search for any body/site with 'right' and 'hand'/'wrist'/'palm'
+            if self._end_effector_id is None:
+                print("WARNING: Searching for right arm end effector...")
+                for body_id in range(self.model.nbody):
+                    body_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body_id)
+                    if body_name:
+                        body_lower = body_name.lower()
+                        if 'right' in body_lower and any(kw in body_lower for kw in ['hand', 'wrist', 'palm']):
+                            self._end_effector_id = ('body', body_id)
+                            print(f"Found fallback end effector: {body_name} (body_id={body_id})")
+                            break
+
+            # Final fallback
+            if self._end_effector_id is None:
+                print("WARNING: Could not find right hand - using fallback body index")
+                fallback_id = min(15, self.model.nbody - 1)
+                self._end_effector_id = ('body', fallback_id)
+
+        # Return position based on cached ID
+        obj_type, obj_id = self._end_effector_id
+        if obj_type == 'site':
+            return self.data.site_xpos[obj_id].copy()
+        else:
+            return self.data.xpos[obj_id].copy()
     
     def _get_distance_to_target(self) -> float:
         """Calculate distance from end effector to target"""
@@ -309,31 +453,47 @@ class G1ReachTouchEnv:
         target_pos = self._get_target_position()
         return np.linalg.norm(ee_pos - target_pos)
     
-    def _calculate_reward(self) -> float:
-        """Calculate reward for current state"""
+    def _calculate_reward(self, action: np.ndarray) -> float:
+        """Calculate reward - HEAVILY WEIGHTED TOWARD VERY CLOSE PROXIMITY"""
         distance = self._get_distance_to_target()
-        
-        # Distance-based reward (closer = better)
-        distance_reward = -distance * 10.0
-        
-        # Progress reward (getting closer)
+
+        # 1. Exponential distance reward (gets much stronger when very close)
+        # Using exponential: e^(-distance) heavily rewards being close
+        distance_reward = -10.0 * distance  # Linear component for far distances
+
+        # 2. Progress reward (only when very close to encourage final approach)
         progress_reward = 0.0
         if self.last_distance is not None:
             progress = self.last_distance - distance
-            progress_reward = progress * 50.0  # Scale progress
-        
-        # Success reward
-        success_reward = 0.0
+            # Only reward progress when already somewhat close
+            if distance < 0.2 and progress > 0:
+                progress_reward = progress * 20.0  # Strong reward only when close
+            elif progress < 0:
+                progress_reward = progress * 2.0  # Penalize moving away
+
+        # 3. Proximity bonuses - HEAVILY weighted toward very close distances
+        proximity_bonus = 0.0
+        if distance < 0.15:
+            proximity_bonus += 5.0  # Small bonus at 15cm
+        if distance < 0.10:
+            proximity_bonus += 20.0  # Bigger bonus at 10cm
+        if distance < 0.08:
+            proximity_bonus += 50.0  # Large bonus at 8cm
+        if distance < 0.06:
+            proximity_bonus += 100.0  # Huge bonus at 6cm
         if distance < self.success_distance:
-            success_reward = 100.0
+            proximity_bonus += 300.0  # MASSIVE success reward!
             print(f"Success! Reached {self.current_target}")
-        
-        # Penalty for time (encourage efficiency)
-        time_penalty = -0.1
-        
-        total_reward = distance_reward + progress_reward + success_reward + time_penalty
+
+        # 4. Small action penalty
+        action_penalty = -0.001 * np.sum(np.abs(action))
+
+        total_reward = distance_reward + progress_reward + proximity_bonus + action_penalty
+
+        # Update tracking
         self.last_distance = distance
-        
+        self.last_action = action.copy()
+
         return total_reward
     
     def _check_success(self) -> bool:
