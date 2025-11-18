@@ -17,14 +17,30 @@ class G1ReachingGymEnv(gym.Env):
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
-    def __init__(self, scene_path="../unitree_g1/g1_table_box_scene.xml", render_mode=None):
-        """Initialize the Gym environment"""
+    def __init__(self, scene_path="../unitree_g1/g1_table_box_scene.xml", render_mode=None,
+                 action_smoothing=0.3, smoothness_weight=1.0, action_scale=0.25, sim_substeps=10):
+        """Initialize the Gym environment
+
+        Args:
+            scene_path: Path to MuJoCo scene file
+            render_mode: Rendering mode ('human', 'rgb_array', or None)
+            action_smoothing: EMA coefficient for action filtering (0=max smoothing, 1=no smoothing)
+            smoothness_weight: Weight for action smoothness penalty in reward
+            action_scale: Scaling factor for actions (lower = smoother but slower)
+            sim_substeps: Number of simulation steps per RL step (higher = more stable)
+        """
         super().__init__()
 
         self.render_mode = render_mode
 
-        # Create the underlying environment
-        self.env = G1ReachTouchEnv(scene_path=scene_path)
+        # Create the underlying environment with smoothness parameters
+        self.env = G1ReachTouchEnv(
+            scene_path=scene_path,
+            action_smoothing=action_smoothing,
+            smoothness_weight=smoothness_weight,
+            action_scale=action_scale,
+            sim_substeps=sim_substeps
+        )
 
         # Define action space (10 actuators: 7 arm + 3 torso)
         self.action_space = spaces.Box(

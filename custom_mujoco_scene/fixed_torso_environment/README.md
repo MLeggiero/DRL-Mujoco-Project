@@ -1,315 +1,218 @@
-# G1 Robot Reaching Task - Reinforcement Learning
+# Unitree G1 Reaching Task - Reinforcement Learning
 
-Train a Unitree G1 robot to reach and touch target objects using deep reinforcement learning with PPO (Proximal Policy Optimization).
+Professional RL training framework for teaching the Unitree G1 humanoid robot to perform reaching tasks using Stable-Baselines3 and MuJoCo.
+
+## Overview
+
+This project implements a reinforcement learning environment where the Unitree G1 humanoid robot learns to reach and touch target objects using its right arm while maintaining a stable base with locked legs.
+
+### Key Features
+
+- **Smooth Motion Control**: Action filtering with exponential moving average and velocity penalties
+- **Stable Training**: Target KL divergence control, gradient clipping, and bounded exploration
+- **Parallel Environments**: Multi-core CPU support for accelerated training
+- **GPU Acceleration**: CUDA support for neural network training
+- **Comprehensive Reward Shaping**: Exponential distance rewards, progress tracking, and proximity bonuses
+
+## Requirements
+
+```bash
+pip install -r requirements.txt
+```
+
+### Dependencies
+
+- Python 3.8+
+- MuJoCo 2.3+
+- stable-baselines3
+- gymnasium
+- numpy
+- torch (with CUDA support recommended)
 
 ## Quick Start
 
-### 1. Installation
+### Basic Training
 
 ```bash
-./scripts/install_dependencies.sh
+python train_sb3.py --scene ../unitree_g1/g1_table_box_scene.xml
 ```
 
-This installs:
-- MuJoCo physics simulator
-- Stable-Baselines3 (PPO implementation)
-- Gymnasium (RL environment interface)
-- TensorBoard (training visualization)
-- NumPy, Matplotlib, SciPy
-
-### 2. Train a Model
-
-**Recommended (500k timesteps, optimized hyperparameters):**
-```bash
-python train_sb3_improved.py
-```
-
-**Standard (100k timesteps, baseline):**
-```bash
-./scripts/train_sb3.sh
-```
-
-Training will:
-- Save checkpoints every 5k steps to `./models/`
-- Evaluate every 2.5k steps
-- Track best model automatically
-- Log to TensorBoard in `./logs/`
-
-### 3. Visualize Trained Policy
+### Optimized Training (Recommended)
 
 ```bash
-./scripts/visualize.sh
+python train_sb3_improved.py --scene ../unitree_g1/g1_table_box_scene.xml
 ```
 
-This launches MuJoCo viewer and runs 5 episodes with the latest trained model.
-
-**Manual visualization:**
-```bash
-# List available models
-python visualize_policy.py --list-models
-
-# Visualize specific model
-python visualize_policy.py --model ./models/g1_ppo_*/best_model/best_model
-
-# Visualize with options
-python visualize_policy.py \
-  --model ./models/g1_ppo_*/best_model/best_model \
-  --episodes 10 \
-  --slow \
-  --stochastic
-```
-
-### 4. Monitor Training
+### Testing Trained Model
 
 ```bash
-tensorboard --logdir ./logs
+python train_sb3.py --test models/path/to/model --scene ../unitree_g1/g1_table_box_scene.xml
 ```
 
-Then open http://localhost:6006 in your browser.
+## Configuration
 
-## Environment Overview
+### Training Parameters
 
-**Task:** Control the G1 robot's right arm to reach and touch a red box on a table.
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--timesteps` | 1,000,000 | Total training timesteps |
+| `--lr` | 5e-4 | Learning rate |
+| `--n-envs` | 4 | Number of parallel environments |
+| `--device` | cuda | Training device (cuda/cpu/auto) |
+| `--batch-size` | 256 | Minibatch size for updates |
+| `--n-epochs` | 10 | PPO update epochs |
 
-**Observations:**
-- Joint positions (right arm + torso)
-- Joint velocities
-- End effector (hand) position
-- Target position
-- Hand-to-target vector
+### Smoothness Parameters
 
-**Actions:**
-- Continuous torques for right arm and torso joints
-- Scaled to `[-0.01, 0.01]` for stability (ultra-gentle control)
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--action-smoothing` | 0.2 | EMA filtering coefficient (lower = smoother) |
+| `--smoothness-weight` | 3.0 | Action change penalty weight |
+| `--action-scale` | 0.35 | Actuator command scaling |
+| `--sim-substeps` | 10 | Physics steps per RL step |
 
-**Rewards:**
-- Distance to target: `-distance`
-- Progress bonus: `10.0 * (prev_distance - current_distance)`
-- Proximity bonuses:
-  - Within 30cm: +1.0
-  - Within 15cm: +3.0
-  - Within 5cm (success): +10.0
-- Time penalty: -0.001 per step
+## Architecture
 
-**Episode Termination:**
-- Success: Hand within 5cm of target
-- Max steps: 300 steps
-- Instability: Robot falls or simulation becomes unstable
+### Environment (`g1_rl_environment.py`)
 
-## Key Files
+- **Observation Space**: Joint positions/velocities, end-effector position, target location
+- **Action Space**: Right arm (7 DOF) + torso (3 DOF) continuous control
+- **Reward Function**: Distance minimization, progress tracking, smoothness penalties
+- **Episode Termination**: Success (< 5cm) or timeout (400 steps)
 
-### Core Environment
-- `g1_rl_environment.py` - Main RL environment implementation
-- `g1_gym_wrapper.py` - Gymnasium wrapper for Stable-Baselines3 compatibility
+### Gym Wrapper (`g1_gym_wrapper.py`)
+
+Provides Gymnasium-compatible interface for Stable-Baselines3 integration.
 
 ### Training Scripts
-- `train_sb3.py` - Standard SB3 training (100k steps, baseline)
-- `train_sb3_improved.py` - Improved training (500k steps, optimized hyperparameters)
-- `train_with_brax.py` - GPU-accelerated training with Brax (optional)
-- `train_auto.py` - Auto-detect hardware and choose best training method
 
-### Visualization
-- `visualize_policy.py` - MuJoCo viewer for trained policies
-- `test_environment.py` - Test environment setup and observations
-- `test_reachability.py` - Verify target is physically reachable
+- `train_sb3.py`: Configurable baseline training script
+- `train_sb3_improved.py`: Optimized configuration for fast convergence and smooth motion
 
-### Utilities
-- `scripts/install_dependencies.sh` - Install all required packages
-- `scripts/visualize.sh` - Quick visualization launcher
-- `scripts/train_sb3.sh` - Quick training launcher
+## Reward Structure
 
-## Configuration Details
+The reward function balances goal achievement with motion quality:
 
-### Current Environment Settings
+### Distance Reward
+Combines exponential and linear terms: `-5*d + 10*exp(-5*d)`
+Provides smooth gradient from far to near distances.
 
-**Action Scaling:** 0.01 (ultra-gentle torques for stability)
-- Prevents DOF 19 instability warnings
-- Slower movements but more controlled
-- Requires longer training (500k+ timesteps)
+### Progress Reward
+Continuous feedback: `50 * (prev_distance - current_distance)`
+Encourages consistent approach to target with triple penalty for moving away.
 
-**Episode Length:** 300 steps
-- Reduced from 1000 for faster learning
-- Robot has ~15 seconds to reach target (50 Hz control)
+### Proximity Bonuses (Cumulative)
+- 20cm: +10
+- 15cm: +20
+- 10cm: +50
+- 8cm: +100
+- 6cm: +200
+- < 5cm: +2000 (success)
 
-**Fixed Base:** Base position and legs are locked in place
-- Simplifies learning problem
-- Focuses training on arm control only
-- Uses PD control to hold leg joints
+### Smoothness Penalties
+- Joint velocity: `-0.01 * sum(joint_vel²)`
+- Action changes: `-3.0 * sum((action - prev_action)²)`
+- Action magnitude: `-0.005 * sum(action²)`
 
-### Training Hyperparameters (Improved Config)
+## Training Results
 
-```python
-{
-    "total_timesteps": 500_000,
-    "learning_rate": 5e-4,
-    "n_steps": 1024,
-    "batch_size": 128,
-    "n_epochs": 20,
-    "gamma": 0.98,
-    "save_freq": 5_000,
-    "eval_freq": 2_500,
-}
-```
+Expected performance with optimized configuration:
 
-## Training Progress Expectations
-
-**Good indicators:**
-- Reward improving from -200 to -50 or better
-- Distance decreasing from 0.5m to < 0.1m
-- Success rate > 20% by end of training
-- Minimum distance achieved < 0.05m
-
-**Poor indicators:**
-- Reward stuck around -300
-- Distance not decreasing
-- Success rate 0%
-- DOF 19 instability warnings (action scaling too high)
-
-## Troubleshooting
-
-### DOF 19 Instability Warnings
-
-**Problem:** `WARNING: Nan, Inf or huge value in QACC at DOF 19`
-
-**Cause:** Action scaling too high, causing floating base to become unstable
-
-**Solution:** Reduce action scaling in `g1_rl_environment.py`:
-```python
-self.data.ctrl[actuator_id] = action[i] * 0.01  # Reduce from 0.1 → 0.01
-```
-
-### Robot Moves Erratically
-
-**Problem:** Robot flailing, moving away from target
-
-**Causes:**
-1. Visualizing old model trained before fixes
-2. Action scaling too high
-3. Not enough training
-
-**Solutions:**
-1. Retrain with current environment version
-2. Reduce action scaling to 0.01
-3. Train for 500k+ timesteps
-
-### Training Not Improving
-
-**Problem:** Reward stuck, no progress after many timesteps
-
-**Possible causes:**
-1. Action scaling too low (robot can't move enough)
-2. Time penalty too high (dominates reward signal)
-3. Episode length too short (not enough time to learn)
-
-**Solutions:**
-1. Increase action scaling slightly (0.01 → 0.02)
-2. Verify time penalty is -0.001 (not -0.01)
-3. Increase max_episode_steps to 500
-
-### Viewer Doesn't Open
-
-**Problem:** MuJoCo viewer window doesn't appear
-
-**Solutions:**
-```bash
-# Check display is available
-echo $DISPLAY
-
-# Install display libraries (Linux)
-sudo apt-get install libgl1-mesa-glx
-
-# Run locally (not over SSH)
-```
-
-## Advanced Usage
-
-### Custom Training Configuration
-
-```python
-from train_sb3 import train_g1_reaching
-
-train_g1_reaching(
-    scene_path="../unitree_g1/g1_table_box_scene.xml",
-    total_timesteps=1_000_000,
-    learning_rate=3e-4,
-    n_steps=2048,
-    batch_size=64,
-    save_freq=10_000,
-    eval_freq=5_000,
-)
-```
-
-### Testing Reachability
-
-```bash
-python test_reachability.py
-```
-
-Tests if target is physically reachable with random actions. Useful for verifying workspace constraints.
-
-### Comparing Models
-
-```bash
-# Best model
-python visualize_policy.py --model ./models/run1/best_model/best_model --episodes 5
-
-# Final model
-python visualize_policy.py --model ./models/run1/final_model --episodes 5
-
-# Random baseline
-python visualize_policy.py --random --episodes 5
-```
-
-## Migration from Custom PPO
-
-This project originally used a custom PPO implementation that had numerical instability issues. We migrated to Stable-Baselines3 for:
-- Better numerical stability (no NaN crashes)
-- Industry-standard implementation
-- Built-in observation/reward normalization
-- TensorBoard integration
-- Checkpoint management
-- Easier debugging and monitoring
-
-See `MIGRATION_GUIDE.md` for technical details.
-
-## Documentation Files
-
-- `README.md` (this file) - Main documentation
-- `VISUALIZATION_GUIDE.md` - Detailed visualization instructions and MuJoCo viewer controls
-- `TRAINING_IMPROVEMENTS.md` - Deep dive into training optimization techniques
-- `QUICK_START_IMPROVEMENTS.md` - Step-by-step fixes for common training issues
-- `MIGRATION_GUIDE.md` - Custom PPO to Stable-Baselines3 migration details
-- `CPU_TRAINING_GUIDE.md` - CPU-specific training optimizations
+- **Convergence**: First successes within 50k-100k steps
+- **Success Rate**: 70-90% by 500k-1M steps
+- **Training Time**: 15-20 minutes (1M steps, 4 parallel environments)
+- **Stability Metrics**: KL divergence < 0.05, policy std < 5000
 
 ## Project Structure
 
 ```
 fixed_torso_environment/
-├── g1_rl_environment.py          # Core RL environment
-├── g1_gym_wrapper.py              # Gymnasium wrapper
-├── train_sb3.py                   # Standard training script
-├── train_sb3_improved.py          # Improved training config
-├── visualize_policy.py            # Visualization tool
-├── test_environment.py            # Environment testing
-├── test_reachability.py           # Reachability testing
-├── requirements.txt               # Python dependencies
-├── scripts/                       # Shell scripts
-│   ├── install_dependencies.sh    # Dependency installation
-│   ├── train_sb3.sh               # Training launcher
-│   └── visualize.sh               # Visualization launcher
-├── models/                        # Trained models (generated)
-├── logs/                          # TensorBoard logs (generated)
-└── docs/                          # Additional documentation
+├── g1_rl_environment.py      # Core MuJoCo environment
+├── g1_gym_wrapper.py          # Gymnasium wrapper
+├── train_sb3.py               # Training script (configurable)
+├── train_sb3_improved.py      # Optimized training configuration
+├── visualize_policy.py        # Policy visualization tool
+├── requirements.txt           # Python dependencies
+├── docs/                      # Additional documentation
+│   └── VISUALIZATION_GUIDE.md
+├── scripts/                   # Utility scripts
+└── models/                    # Trained model checkpoints
 ```
 
-## Contributing
+## Monitoring Training
 
-When modifying the environment or training code:
-1. Test changes with `python test_environment.py`
-2. Verify reachability with `python test_reachability.py`
-3. Train for at least 100k steps to validate improvements
-4. Visualize results to confirm behavior
+### TensorBoard
+
+```bash
+tensorboard --logdir logs/
+```
+
+### Real-time Metrics
+
+Training outputs:
+- Episode rewards and lengths
+- Success rate
+- Distance to target
+- KL divergence and policy statistics
+
+## Advanced Usage
+
+### Custom Reward Tuning
+
+Modify `g1_rl_environment.py::_calculate_reward()` to adjust:
+- Distance reward weights
+- Proximity bonus thresholds
+- Smoothness penalty strengths
+
+### Parallel Environment Scaling
+
+```bash
+# Use 8 parallel environments (requires 8+ CPU cores)
+python train_sb3_improved.py --n-envs 8
+
+# Disable parallelization for debugging
+python train_sb3.py --n-envs 1
+```
+
+### Hyperparameter Optimization
+
+Key parameters for tuning:
+- **Learning rate**: Balance between stability and convergence speed
+- **Batch size**: Affects gradient estimate variance
+- **Entropy coefficient**: Controls exploration magnitude
+- **Target KL**: Prevents policy divergence
+
+## Troubleshooting
+
+### High KL Divergence (> 2.0)
+- Reduce learning rate
+- Decrease number of epochs
+- Verify target_kl is enabled (0.02)
+
+### Policy Not Converging
+- Increase success bonus weight in reward function
+- Check reward clipping limits
+- Verify observation normalization is active
+
+### Shaky or Jerky Motion
+- Increase action smoothing (lower alpha value)
+- Increase smoothness penalty weight
+- Reduce action scaling factor
+- Increase physics substeps
+
+### Out of Memory
+- Reduce number of parallel environments
+- Decrease batch size
+- Use smaller network architecture
+
+## Visualization
+
+```bash
+./scripts/visualize.sh
+```
+
+This launches the MuJoCo viewer with the best trained model. See `docs/VISUALIZATION_GUIDE.md` for detailed controls and options.
 
 ## License
 
-This project uses MuJoCo (Apache 2.0), Stable-Baselines3 (MIT), and Gymnasium (MIT).
+This project is provided for research and educational purposes.
