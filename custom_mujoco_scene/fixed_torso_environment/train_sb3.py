@@ -266,6 +266,29 @@ class DynamicPlottingCallback(BaseCallback):
                 plt.close(self.fig)
 
 
+class EvalCallbackWithVecNormalize(EvalCallback):
+    """
+    Extended EvalCallback that also saves VecNormalize stats with best model.
+
+    This ensures visualization can load the same normalization statistics
+    that were used during training, preventing the train/test mismatch issue.
+    """
+
+    def _on_step(self) -> bool:
+        # Call parent's _on_step which handles evaluation and best model saving
+        continue_training = super()._on_step()
+
+        # If a new best model was just saved, also save VecNormalize stats
+        if self.best_model_save_path is not None and self.training_env is not None:
+            # Check if VecNormalize is being used
+            if isinstance(self.training_env, VecNormalize):
+                # Save VecNormalize stats to best model directory
+                vec_norm_path = os.path.join(self.best_model_save_path, "best_model_vecnormalize.pkl")
+                self.training_env.save(vec_norm_path)
+
+        return continue_training
+
+
 def make_env(scene_path, rank=0, seed=0, action_smoothing=0.3, smoothness_weight=1.0,
              action_scale=0.25, sim_substeps=10):
     """Create and wrap the environment with smoothness parameters.
@@ -301,20 +324,23 @@ def train_g1_reaching(
     scene_path="../unitree_g1/g1_table_box_scene.xml",
     total_timesteps=100_000,
     learning_rate=3e-4,
-    n_steps=2048,
-    batch_size=64,
+    n_steps=4096,
+    batch_size=512,
     n_epochs=10,
     gamma=0.99,
     gae_lambda=0.95,
+    ent_coef=0.01,
+    clip_range=0.1,
+    target_kl=0.01,
     save_freq=10_000,
     eval_freq=5_000,
     log_dir="./logs",
     model_dir="./models",
     seed=0,
     device='cuda',
-    action_smoothing=0.3,
-    smoothness_weight=1.0,
-    action_scale=0.25,
+    action_smoothing=0.35,
+    smoothness_weight=1.2,
+    action_scale=0.5,
     sim_substeps=10,
     n_envs=4,
     enable_plot=True,
@@ -410,8 +436,8 @@ def train_g1_reaching(
         env,
         norm_obs=True,
         norm_reward=True,
-        clip_obs=10.0,
-        clip_reward=500.0,  # Increased to preserve MASSIVE success bonus (up to +2000)
+        clip_obs=12.0,
+        clip_reward=600.0,  # Increased to preserve MASSIVE success bonus (up to +2000)
         gamma=gamma
     )
 
@@ -442,7 +468,7 @@ def train_g1_reaching(
         save_vecnormalize=True
     )
 
-    eval_callback = EvalCallback(
+    eval_callback = EvalCallbackWithVecNormalize(
         eval_env,
         best_model_save_path=f"{model_dir}/{run_name}/best_model",
         log_path=f"{log_dir}/{run_name}",
@@ -483,18 +509,18 @@ def train_g1_reaching(
         n_epochs=n_epochs,
         gamma=gamma,
         gae_lambda=gae_lambda,
-        clip_range=0.2,
+        clip_range=clip_range,  # Now configurable - tighter clipping for fine control
         clip_range_vf=None,
-        ent_coef=0.0005,  # REDUCED from 0.01 to reduce exploration noise and shakiness
+        ent_coef=ent_coef,  # INCREASED to 0.01 for better exploration and escaping local minima
         vf_coef=0.5,
         max_grad_norm=0.5,
         use_sde=False,
         sde_sample_freq=-1,
-        target_kl=0.02,  # CRITICAL: Stop updates early if policy changes too much (prevents instability)
+        target_kl=target_kl,  # More conservative policy updates (0.01)
         tensorboard_log=f"{log_dir}/{run_name}",
         policy_kwargs=dict(
             # INCREASED network size from 256-256 to 512-512 for smoother, more capable policies
-            net_arch=[dict(pi=[512, 512], vf=[512, 512])],
+            net_arch=[dict(pi=[256, 256], vf=[256, 256])],
             # Use tanh activation for smoother outputs
             activation_fn=torch.nn.Tanh
         ),

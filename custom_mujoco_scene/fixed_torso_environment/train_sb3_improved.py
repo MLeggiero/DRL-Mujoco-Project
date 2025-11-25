@@ -11,19 +11,22 @@ from train_sb3 import train_g1_reaching, test_trained_model
 # Key improvements: Better reward shaping, velocity penalties, learning rate schedule
 IMPROVED_CONFIG = {
     # Training length - optimized for faster convergence
-    "total_timesteps": 1_000_000,  # 1M steps should now converge faster with improved rewards
+    "total_timesteps": 12_000_000,  # 1M steps should now converge faster with improved rewards
 
-    # Learning parameters - ADAPTIVE schedule for faster early learning
-    "learning_rate": 5e-4,  # Higher initial LR (was 3e-4) for faster convergence
+    # Learning parameters - Lower for more stable learning
+    "learning_rate": 3e-4,  # Slightly lower for more stable learning
     # Note: Will decay automatically with PPO's built-in schedule if using linear schedule
 
-    # PPO parameters - optimized for faster convergence
-    "n_steps": 2048,  # Collect diverse experience
-    "batch_size": 256,  # INCREASED from 128 - larger batches for more stable updates
+    # PPO parameters - optimized for breaking local minima
+    "n_steps": 4096,  # INCREASED for better advantage estimation
+    "batch_size": 512,  # INCREASED for more stable gradients
     "n_epochs": 10,  # Standard PPO range
+    "ent_coef": 0.01,  # INCREASED exploration (from 0.0035)
+    "clip_range": 0.1,  # Tighter clipping for fine control
+    "target_kl": 0.01,  # More conservative policy updates
 
     # Discount and GAE - tuned for reaching task
-    "gamma": 0.99,  # Standard discount
+    "gamma": 0.98,  # Standard discount
     "gae_lambda": 0.95,  # Helps with credit assignment
 
     # Monitoring - more frequent for faster convergence tracking
@@ -31,15 +34,15 @@ IMPROVED_CONFIG = {
     "eval_freq": 5_000,   # Evaluate every 5k steps (was 10k) - catch success early
 
     # Device
-    "device": "cuda",  # Use GPU by default
+    "device": "cpu",  # Use CPU by default
 
     # Parallel environments for faster training
     "n_envs": 4,  # Use 4 parallel environments (safe for most systems)
 
-    # Action smoothing parameters - OPTIMIZED for smooth motion
+    # Action smoothing parameters - BALANCED for reaching
     "action_smoothing": 0.2,  # INCREASED smoothing (was 0.3) - smoother motion
-    "smoothness_weight": 3.0,  # INCREASED (was 2.0) - stronger smoothness penalty
-    "action_scale": 0.35,      # INCREASED (was 0.3) - slightly faster movements for convergence
+    "smoothness_weight": 1.5,  # REDUCED to allow bolder actions (was 3.0)
+    "action_scale": 0.5,       # INCREASED to 0.5 for precise control (was 0.28)
     "sim_substeps": 10,        # Good balance between stability and speed
 }
 
@@ -81,8 +84,9 @@ if __name__ == "__main__":
         print("="*70)
         print("\nConfiguration for SMOOTH GENERALIZED REACHING:")
         print("  - Object position RANDOMIZED each episode!")
-        print("    * X: 0.35-0.65m (forward)")
-        print("    * Y: -0.2 to +0.2m (left/right)")
+        print("    * X: 0.2-0.5m (forward) - 10CM CLOSER for initial training!")
+        print("    * Y: ±10cm (left/right) - EXACTLY ±10CM VARIATION")
+        print("    * Z: Fixed at table height (no vertical variation)")
         print("  - Legs perfectly locked")
         print()
         # Override config with command-line arguments BEFORE printing
@@ -102,24 +106,43 @@ if __name__ == "__main__":
         if args.sim_substeps is not None:
             config['sim_substeps'] = args.sim_substeps
 
-        print("CONVERGENCE OPTIMIZATIONS:")
-        print(f"  - Higher learning rate: {config['learning_rate']} (faster early learning)")
-        print(f"  - Larger batch size: {config['batch_size']} (more stable updates)")
-        print(f"  - Enhanced reward shaping: exponential + linear distance rewards")
-        print(f"  - Stronger progress rewards: 50x gradient (always active)")
-        print(f"  - Earlier proximity bonuses: starting at 20cm (was 15cm)")
-        print(f"  - MASSIVE success bonus: +2000 (dominates all penalties)")
-        print(f"  - More frequent eval: every {config['eval_freq']} steps")
+        print("BREAKING BOTH 0.3M AND 0.1M LOCAL MINIMA - ENHANCED REWARDS:")
         print()
-        print("SMOOTHNESS IMPROVEMENTS:")
-        print(f"  - Action filtering: EMA alpha={config['action_smoothing']} (STRONGER)")
-        print(f"  - Smoothness penalty: weight={config['smoothness_weight']} (INCREASED)")
-        print(f"  - Velocity penalties: -0.01 * joint_vel² (NEW!)")
-        print(f"  - Action scaling: {config['action_scale']}")
+        print("1. REWARD FUNCTION IMPROVEMENTS (V2 - Enhanced for 0.1m plateau):")
+        print(f"  - Exponential distance reward: exp(-15*d) - STRONGER gradient (was -10)")
+        print(f"  - MASSIVE success bonus: +5000 at <5cm (was +1000 - 5x increase!)")
+        print(f"  - TIERED Comfort zone penalties:")
+        print(f"    • >0.15m: -100 (breaks 0.3m plateau)")
+        print(f"    • 0.08-0.15m: -80 (NEW! breaks 0.1m plateau)")
+        print(f"    • 0.06-0.08m: -40 (final push to goal)")
+        print(f"  - Proximity bonuses: <0.15m:+50, <0.10m:+100, <0.08m:+200, <0.06m:+500")
+        print(f"  - Velocity reward: +10*v_toward_target (encourages active movement)")
+        print(f"  - Dense approach bonus: +200*(Δd) every step (was +100 - DOUBLED)")
+        print()
+        print("2. ACTION SCALE INCREASE:")
+        print(f"  - Action scaling: {config['action_scale']} (DOUBLED from 0.25 for precise control)")
+        print()
+        print("3. CURRICULUM LEARNING (10cm closer for initial success!):")
+        print(f"  - Episodes 0-1000: Easy targets (0.2-0.4m, ±10cm)")
+        print(f"  - Episodes 1000-3000: Medium targets (0.3-0.5m, ±10cm)")
+        print(f"  - Episodes 3000+: Full range (0.3-0.5m, ±10cm)")
+        print(f"  - Red box is 10cm closer to enable successful initial training!")
+        print()
+        print("4. PPO PARAMETER TUNING:")
+        print(f"  - Learning rate: {config['learning_rate']} (stable learning)")
+        print(f"  - Batch size: {config['batch_size']} (INCREASED for stable gradients)")
+        print(f"  - Rollout steps: {config['n_steps']} (INCREASED for better advantage estimation)")
+        print(f"  - Entropy coefficient: {config['ent_coef']} (INCREASED exploration)")
+        print(f"  - Clip range: {config['clip_range']} (tighter for fine control)")
+        print(f"  - Target KL: {config['target_kl']} (conservative policy updates)")
+        print()
+        print("5. SUCCESS-BASED RESET:")
+        print(f"  - After success: robot position varies by ±2cm for generalization")
+        print()
+        print("6. SMOOTHNESS SETTINGS:")
+        print(f"  - Action filtering: EMA alpha={config['action_smoothing']}")
+        print(f"  - Smoothness penalty: weight={config['smoothness_weight']}")
         print(f"  - Physics substeps: {config['sim_substeps']}")
-        print(f"  - Lower entropy coefficient: 0.0005 (stable exploration)")
-        print(f"  - Larger network: 512x512 (was 256x256)")
-        print(f"  - target_kl: 0.02 (prevents divergence)")
         print()
         print("PARALLEL TRAINING:")
         print(f"  - Parallel environments: {config['n_envs']} (speeds up data collection)")
@@ -133,21 +156,6 @@ if __name__ == "__main__":
         print(f"  - Rollout length: {config['n_steps']} steps")
         print(f"  - Batch size: {config['batch_size']}")
         print(f"  - Epochs: {config['n_epochs']}")
-        print("="*70)
-        print()
-        print("ENHANCED REWARD FUNCTION:")
-        print("  Distance:")
-        print("    - Exponential + linear: -5*d + 10*exp(-10*d) [steeper decay]")
-        print("  Progress:")
-        print("    - Always active: 50x gradient")
-        print("    - Penalty for moving away: 3x stronger")
-        print("  Proximity bonuses (cumulative):")
-        print("    - 20cm: +10 | 15cm: +20 | 10cm: +50 | 8cm: +100 | 6cm: +200")
-        print("    - <5cm: +2000 ⭐ GOAL ACHIEVEMENT - dominates all other rewards!")
-        print("  Smoothness:")
-        print("    - Velocity penalty: -0.01 * Σ(joint_vel²)")
-        print("    - Action change penalty: -3.0 * Σ(Δaction²)")
-        print("    - Action magnitude: -0.005 * Σ(action²)")
         print("="*70)
         print()
 

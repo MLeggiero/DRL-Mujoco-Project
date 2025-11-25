@@ -20,7 +20,7 @@ class G1ReachTouchEnv:
     """
 
     def __init__(self, scene_path="../unitree_g1/g1_table_box_scene.xml",
-                 action_smoothing=0.3, smoothness_weight=1.0, action_scale=0.25, sim_substeps=10):
+                 action_smoothing=0.3, smoothness_weight=1.0, action_scale=0.5, sim_substeps=10):
         """Initialize the environment.
 
         Args:
@@ -41,7 +41,7 @@ class G1ReachTouchEnv:
         self.viewer = None
 
         # Episode parameters
-        self.max_episode_steps = 400
+        self.max_episode_steps = 600  # INCREASED from 400 - more time to reach goal
         self.current_step = 0
 
         # Robot configuration
@@ -63,6 +63,14 @@ class G1ReachTouchEnv:
         self.last_distance = None
         self.last_action = None
         self.typical_start_distance = 0.7
+        self.previous_distance_to_target = None
+        self.last_end_effector_pos = None
+
+        # Curriculum learning tracking
+        self.episode_count = 0
+
+        # Success tracking for reset variations
+        self.last_episode_success = False
 
         print(f"Action smoothing: alpha={action_smoothing}, weight={smoothness_weight}")
         print(f"Action scale: {action_scale}, Substeps: {sim_substeps}")
@@ -212,11 +220,20 @@ class G1ReachTouchEnv:
         self.last_distance = None
         self.last_action = None
         self.filtered_action = None  # Reset action filter
+        self.previous_distance_to_target = None
+        self.last_end_effector_pos = None
+
+        # Increment episode count for curriculum learning
+        self.episode_count += 1
 
         # Get initial observation
         obs = self._get_observation()
 
-        print(f"Episode reset - Target: {self.current_target}")
+        # Store initial distance and position
+        self.previous_distance_to_target = obs['distance_to_target']
+        self.last_end_effector_pos = obs['end_effector_pos'].copy()
+
+        print(f"Episode reset - Target: {self.current_target}, Episode count: {self.episode_count}")
         return obs
     
     def _reset_robot_pose(self):
@@ -224,10 +241,22 @@ class G1ReachTouchEnv:
 
         Configures the humanoid in a stable standing position with legs locked
         and right arm positioned for reaching tasks.
+
+        After successful episodes, adds small random variations to the initial
+        position to improve policy generalization.
         """
         # Reset all velocities
         self.data.qvel[:] = 0
-        
+
+        # Add position variation after success (2cm std dev for generalization)
+        robot_pos = self.initial_robot_pos.copy()
+        if self.last_episode_success:
+            # Small random variations in x, y position (not z - keep height stable)
+            position_variation = np.random.normal(0, 0.02, 2)  # 2cm std dev
+            robot_pos[0] += position_variation[0]
+            robot_pos[1] += position_variation[1]
+            # Keep z (height) stable for safety
+
         # Set robot position
         for i in range(self.model.njnt):
             joint_type = self.model.jnt_type[i]
@@ -238,8 +267,8 @@ class G1ReachTouchEnv:
             if joint_type == mujoco.mjtJoint.mjJNT_FREE and qpos_addr + 6 < self.model.nq:
                 # Only modify robot's floating base, not object free joints
                 if 'floating_base' in joint_lower or 'base' in joint_lower or 'pelvis' in joint_lower:
-                    # Robot floating base: set to standing position
-                    self.data.qpos[qpos_addr:qpos_addr+3] = self.initial_robot_pos
+                    # Robot floating base: set to standing position (with variations if success)
+                    self.data.qpos[qpos_addr:qpos_addr+3] = robot_pos
                     self.data.qpos[qpos_addr+3:qpos_addr+7] = [1, 0, 0, 0]  # Quaternion
 
                     # Save floating base info
@@ -293,11 +322,36 @@ class G1ReachTouchEnv:
             self.initial_leg_qpos[joint_id] = self.data.qpos[qpos_addr]
     
     def _randomize_object_positions(self):
-        """Randomize target object positions to improve policy generalization.
+        """Randomize target object positions with curriculum learning.
 
-        Positions are randomized within a reachable workspace region to encourage
-        the policy to learn robust reaching behaviors.
+        Object starts 10cm closer to robot than original, with ±10cm variation
+        in both x and y directions (no vertical variation).
+
+        Uses progressive difficulty based on episode count:
+        - Episodes 0-1000: Targets at 0.2-0.4m, ±10cm (easier, closer)
+        - Episodes 1000-3000: Targets at 0.3-0.5m, ±10cm (medium difficulty)
+        - Episodes 3000+: Targets at 0.3-0.5m, ±10cm (full range)
+
+        This helps the robot learn easier reaching first before tackling harder distances.
         """
+        # Curriculum learning: adjust difficulty based on episode count
+        # All ranges are now 10cm closer and have exactly ±10cm variation
+        if self.episode_count < 1000:
+            # Stage 1: Easier targets (closest to robot)
+            # Center: 0.3m, Range: ±0.1m (10cm)
+            x_min, x_max = 0.2, 0.4
+            y_min, y_max = -0.1, 0.1
+        elif self.episode_count < 3000:
+            # Stage 2: Medium difficulty
+            # Center: 0.4m, Range: ±0.1m (10cm)
+            x_min, x_max = 0.3, 0.5
+            y_min, y_max = -0.1, 0.1
+        else:
+            # Stage 3: Full range (same as stage 2 - already close enough)
+            # Center: 0.4m, Range: ±0.1m (10cm)
+            x_min, x_max = 0.3, 0.5
+            y_min, y_max = -0.1, 0.1
+
         for obj_name in self.target_objects:
             body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, obj_name)
             if body_id >= 0:
@@ -306,13 +360,13 @@ class G1ReachTouchEnv:
                     if self.model.jnt_bodyid[i] == body_id and self.model.jnt_type[i] == mujoco.mjtJoint.mjJNT_FREE:
                         qpos_addr = self.model.jnt_qposadr[i]
                         if qpos_addr + 6 < self.model.nq:
-                            # Randomize position in a reachable region
-                            # X: 0.4m to 0.6m (forward distance)
-                            # Y: -0.15m to +0.15m (left/right)
-                            # Z: On table (0.74m)
-                            x = np.random.uniform(0.35, 0.65)
-                            y = np.random.uniform(-0.2, 0.2)
-                            z = 0.74  # Table height
+                            # Randomize position based on curriculum stage
+                            # X: forward distance (±10cm variation)
+                            # Y: left/right (±10cm variation)
+                            # Z: fixed at table height (no vertical variation)
+                            x = np.random.uniform(x_min, x_max)
+                            y = np.random.uniform(y_min, y_max)
+                            z = 0.74  # Table height (fixed - no vertical variation)
                             self.data.qpos[qpos_addr:qpos_addr+3] = [x, y, z]
                         break
     
@@ -379,12 +433,19 @@ class G1ReachTouchEnv:
         # Check if episode is done
         done = self._check_done()
 
+        # Check success
+        success = self._check_success()
+
         # Additional info
         info = {
             'target': self.current_target,
             'distance_to_target': self._get_distance_to_target(),
-            'success': self._check_success()
+            'success': success
         }
+
+        # Track success for next reset
+        if done:
+            self.last_episode_success = success
 
         self.current_step += 1
 
@@ -534,10 +595,13 @@ class G1ReachTouchEnv:
         return np.linalg.norm(ee_pos - target_pos)
 
     def _calculate_reward(self, action: np.ndarray) -> float:
-        """Calculate reward function for reaching task.
+        """Calculate reward function for reaching task with improved shaping.
 
-        Combines distance-based rewards, progress incentives, proximity bonuses,
-        and smoothness penalties to encourage efficient reaching behavior.
+        Key improvements to break 0.3m local minimum:
+        - Exponential distance reward (gets much higher as you get closer)
+        - Comfort zone penalty (penalizes staying >0.2m away)
+        - Velocity reward (encourages movement toward target)
+        - Approach bonus (rewards getting closer step-by-step)
 
         Args:
             action: Raw action vector for smoothness penalty computation
@@ -546,57 +610,95 @@ class G1ReachTouchEnv:
             Scalar reward value
         """
         distance = self._get_distance_to_target()
+        ee_pos = self._get_end_effector_position()
+        target_pos = self._get_target_position()
 
-        # Distance reward with exponential shaping for better gradient
-        # Steeper exponential decay (-10.0) ensures rewards stay negative until very close to goal
-        distance_reward = -5.0 * distance + 10.0 * np.exp(-10.0 * distance)
+        # 1. EXPONENTIAL DISTANCE REWARD - Gets much higher as you approach
+        # INCREASED steepness from -10 to -15 for stronger gradient near goal
+        distance_reward = np.exp(-15 * distance)
 
-        # Progress reward (active throughout episode)
-        progress_reward = 0.0
-        if self.last_distance is not None:
-            progress = self.last_distance - distance
-            progress_reward = progress * 50.0
-            # Triple penalty for moving away from target
-            if progress < 0:
-                progress_reward *= 3.0
+        # 2. MASSIVE SUCCESS BONUS - Dominates all other rewards
+        # INCREASED from 1000 to 5000 to make success irresistible
+        success_reward = 0.0
+        if distance < self.success_distance:  # 5cm success threshold
+            success_reward = 5000.0
+            print(f"🎯 SUCCESS! Reached {self.current_target} - distance: {distance:.4f}m")
 
-        # Proximity bonuses for approaching target
+        # 3. TIERED COMFORT ZONE PENALTIES - Break BOTH local minima (0.3m AND 0.1m!)
+        # These penalties force the robot to keep pushing closer
+        comfort_penalty = 0.0
+        if distance > 0.15:
+            comfort_penalty = -100.0  # Strong penalty for staying far (breaks 0.3m plateau)
+        elif distance > 0.08:
+            comfort_penalty = -80.0   # NEW: Strong penalty in 0.08-0.15m range (breaks 0.1m plateau!)
+        elif distance > 0.06:
+            comfort_penalty = -40.0   # Moderate penalty in 0.06-0.08m range (push to finish)
+
+        # 4. VELOCITY REWARD - Encourage active movement toward target
+        velocity_reward = 0.0
+        if self.last_end_effector_pos is not None:
+            # Calculate end effector velocity
+            ee_velocity = (ee_pos - self.last_end_effector_pos) / (self.sim_substeps * self.model.opt.timestep)
+            # Direction to target
+            direction_to_target = target_pos - ee_pos
+            direction_norm = np.linalg.norm(direction_to_target)
+            if direction_norm > 1e-6:
+                direction_to_target = direction_to_target / direction_norm
+                # Reward velocity component toward target
+                velocity_toward_target = np.dot(ee_velocity, direction_to_target)
+                velocity_reward = 10.0 * max(0, velocity_toward_target)
+
+        # 5. PROXIMITY BONUSES - Extra rewards for getting into critical ranges
+        # These bonuses help break through the 0.1m plateau
         proximity_bonus = 0.0
-        if distance < 0.20:
-            proximity_bonus += 10.0
         if distance < 0.15:
-            proximity_bonus += 20.0
+            proximity_bonus += 50.0   # Entered close range
         if distance < 0.10:
-            proximity_bonus += 50.0
+            proximity_bonus += 100.0  # Breaking the 0.1m barrier!
         if distance < 0.08:
-            proximity_bonus += 100.0
+            proximity_bonus += 200.0  # Very close now
         if distance < 0.06:
-            proximity_bonus += 200.0
-        if distance < self.success_distance:
-            proximity_bonus += 2000.0
-            print(f"Success! Reached {self.current_target}")
+            proximity_bonus += 500.0  # Almost there!
 
-        # Velocity penalty to encourage smooth joint movements
-        velocity_penalty = 0.0
+        # 6. DENSE APPROACH BONUS - Reward getting closer each step
+        # INCREASED multiplier from 100 to 200 for stronger signal
+        approach_bonus = 0.0
+        if self.previous_distance_to_target is not None:
+            previous_distance = self.previous_distance_to_target
+            current_distance = distance
+
+            # Bonus for moving closer (DOUBLED from 100 to 200)
+            if current_distance < previous_distance:
+                approach_bonus = (previous_distance - current_distance) * 200
+            else:
+                # Penalty for moving away (INCREASED from -10 to -20)
+                approach_bonus = -20
+
+        # 7. Joint velocity penalty - moderate to allow necessary movements
+        joint_velocity_penalty = 0.0
         qvel_indices = self.right_arm_qvel_indices + self.torso_qvel_indices
         if len(qvel_indices) > 0:
             joint_velocities = self.data.qvel[qvel_indices]
-            velocity_penalty = -0.01 * np.sum(np.square(joint_velocities))
+            joint_velocity_penalty = -0.005 * np.sum(np.square(joint_velocities))
 
-        # Action magnitude penalty for efficiency
+        # 8. Action magnitude penalty for energy efficiency
         action_penalty = -0.005 * np.sum(np.square(action))
 
-        # Smoothness penalty to discourage jerky movements
+        # 9. Smoothness penalty to discourage jerky movements
         smoothness_penalty = 0.0
         if self.last_action is not None:
             action_change = np.sum(np.square(action - self.last_action))
             smoothness_penalty = -self.smoothness_weight * action_change
 
-        total_reward = (distance_reward + progress_reward + proximity_bonus +
-                       velocity_penalty + action_penalty + smoothness_penalty)
+        # TOTAL REWARD - Now includes proximity bonuses!
+        total_reward = (distance_reward + success_reward + comfort_penalty +
+                       velocity_reward + proximity_bonus + approach_bonus +
+                       joint_velocity_penalty + smoothness_penalty + action_penalty)
 
-        # Update tracking
+        # Update tracking for next step
         self.last_distance = distance
+        self.previous_distance_to_target = distance
+        self.last_end_effector_pos = ee_pos.copy()
         self.last_action = action.copy()
 
         return total_reward
