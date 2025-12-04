@@ -1,0 +1,8 @@
+frames: 100
+cameras: ['track_left']
+resolution: 640x480
+fps: 30
+timestep: 0.004
+total_steps: 800
+sim_time: 3.2
+timestamp: 2025-12-02T21:49:46.214494
