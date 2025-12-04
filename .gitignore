@@ -1,0 +1,95 @@
+# ========== GENERATED DATA - DO NOT TRACK ==========
+
+# RGB-D Camera Data
+pointcloud_data/
+camera_data/
+rgbd_data/
+
+# Model Checkpoints and Weights
+models/
+checkpoints/
+weights/
+*.pth
+*.pt
+*.pkl
+*_vecnormalize.pkl
+
+# Training Logs and Outputs
+logs/
+runs/
+outputs/
+results/
+plots/
+evaluations.npz
+
+# Training and Evaluation Artifacts
+training_progress_*.png
+training_progress_final.png
+progress.csv
+
+# ========== PYTHON AND VENV ==========
+
+# Virtual Environments
+mujoco_env/
+venv/
+env/
+ENV/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ========== TESTING & CACHING ==========
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type Checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ========== OS FILES ==========
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+.trash-1000/
+*~
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# ========== PROJECT SPECIFIC ==========
+
+# Temporary simulation data
+tmp/
+temp/
+
+# Large datasets (uncomment as needed)
+# *.zip
+# *.tar
+# *.tar.gz
