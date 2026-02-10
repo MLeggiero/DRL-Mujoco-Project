@@ -101,8 +101,8 @@
 
     <!-- Scene materials -->
     <material name="table_wood" rgba="0.8 0.6 0.4 1" shininess="0.5"/>
-    <material name="hammer_metal" rgba="0.6 0.6 0.6 1" shininess="0.8"/>
-    <material name="hammer_wood" rgba="0.7 0.5 0.3 1" shininess="0.3"/>
+    <material name="hammer_metal" rgba="0.8 0.1 0.1 1" shininess="0.8"/>  <!-- Bright red metal head -->
+    <material name="hammer_wood" rgba="1.0 0.2 0.2 1" shininess="0.3"/>   <!-- Bright red handle -->
 
     <texture name="floor_tex" type="2d" builtin="checker" width="300" height="300"
              rgb1="0.3 0.3 0.3" rgb2="0.4 0.4 0.4"/>
@@ -186,7 +186,7 @@
 
     <!-- Hammer with realistic physics - head heavier than handle -->
     <!-- Positioned on the table for grasping -->
-    <body name="hammer" pos="0.9 0 3" euler="1.57079633 0 0">
+    <body name="hammer" pos="0.9 0 0.76" euler="1.57079633 0 0">
       <!-- Free joint to allow full 6DOF motion -->
       <joint name="hammer_joint" type="free"/>
 
@@ -394,6 +394,10 @@
                           <site name="right_hand_site" pos="0.08 0 0" size="0.02" rgba="0 1 0 0.5"/>
                           <geom name="right_hand_collision" class="collision" size="0.035" rgba=".2 .6 .2 .2"
                             fromto="0.07 0 0 0.15 0.02 0"/>
+
+                          <!-- Wrist-mounted camera (eye-in-hand) -->
+                          <camera name="right_wrist_camera" pos="0.05 0 0.02" xyaxes="0 -1 0 0.5 0 0.866" fovy="75"/>
+                          <camera name="right_wrist_camera_down" pos="0.08 0 0.03" xyaxes="0 -1 0 0.866 0 -0.5" fovy="75"/>
 
                           <!-- Right Hand Fingers -->
                           <body name="right_hand_thumb_0_link" pos="0.067 -0.003 0">

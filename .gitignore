@@ -89,7 +89,40 @@ desktop.ini
 tmp/
 temp/
 
-# Large datasets (uncomment as needed)
-# *.zip
-# *.tar
-# *.tar.gz
+# Large datasets
+*.zip
+*.tar
+*.tar.gz
+*.h5
+*.hdf5
+
+# ========== TOOL USE ENV - CAPTURED DATA ==========
+
+# Point cloud captures and camera data
+tool_use_env/pointcloud_data/
+tool_use_env/pointcloud_data_red/
+tool_use_env/wrist_pointcloud_data/
+tool_use_env/wrist_down_pointcloud_data/
+tool_use_env/*.ply
+tool_use_env/*.npy
+tool_use_env/*.npz
+
+# Detection and segmentation result images
+tool_use_env/grounding_dino_results/
+tool_use_env/red_hammer_detection/
+tool_use_env/yolo_results/
+tool_use_env/scene_detection_colored.png
+
+# Training logs and tensorboard artifacts
+tool_use_env/training_test/
+tool_use_env/*.log
+training_test.log
+
+# Claude settings (local IDE config)
+.claude/
+**/.claude/
+
+# Numpy/PLY data files anywhere in project
+*.npy
+*.npz
+*.ply
